@@ -1,0 +1,36 @@
+# 1️⃣ 가상환경 관련
+venv/  # 가상환경 폴더 무시
+
+# 2️⃣ Python 캐시 파일
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 3️⃣ 환경 변수 및 설정 파일
+.env
+.env.local
+.env.production
+.env.test
+
+# 4️⃣ IDE 및 OS 생성 파일
+.vscode/
+.idea/
+.DS_Store  # MacOS
+Thumbs.db  # Windows
+
+# 5️⃣ 로그 및 실행 결과
+logs/
+*.log
+*.out
+*.pid
+*.swp  # Vim 편집 중 생성되는 파일
+
+# 6️⃣ Python 패키지 관련
+*.egg-info/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 7️⃣ 빌드/배포 관련
+dist/
+build/
