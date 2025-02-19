@@ -9,6 +9,7 @@ class VideoRequest(BaseModel):
 class VideoResponse(BaseModel):
     videoId: int
     status: str
+    videoUrl: str
 
 @router.post("/generate", response_model=VideoResponse)
 async def generate_video(request: VideoRequest):
@@ -16,4 +17,4 @@ async def generate_video(request: VideoRequest):
         raise HTTPException(status_code=400, detail="유효하지 않은 summary_id")
     
     videoId = request.summaryId  # 실제로는 DB에서 ID를 생성해야 함
-    return VideoResponse(videoId=videoId, status="PROCESSING")
+    return VideoResponse(videoId=videoId, status="PROCESSING", videoUrl=f"http://example.com/video/{videoId}")
