@@ -1,16 +1,20 @@
-from flask import Blueprint, request, jsonify
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from services.crawling_service import get_blog_content
 
-crawling_bp = Blueprint("crawling", __name__)
+router = APIRouter()
 
 
-@crawling_bp.route("/", methods=["POST"])
-def crawl():
-    data = request.get_json()
-    blog_url = data.get("url")
+class BlogRequest(BaseModel):
+    url: str
+
+
+@router.post("/", summary="네이버 블로그 크롤링", description="네이버 블로그의 내용을 크롤링하여 반환합니다.")
+async def crawl(data: BlogRequest):
+    blog_url = data.url
 
     if not blog_url or "blog.naver.com" not in blog_url:
-        return jsonify({"error": "❌ 올바른 네이버 블로그 링크가 아님"}), 400
+        raise HTTPException(status_code=400, detail="❌ 올바른 네이버 블로그 링크가 아님")
 
     blog_content = get_blog_content(blog_url)
-    return jsonify({"blog_content": blog_content})
+    return {"blog_content": blog_content}
