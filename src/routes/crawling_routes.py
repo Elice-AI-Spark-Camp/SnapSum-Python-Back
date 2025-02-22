@@ -9,7 +9,7 @@ class BlogRequest(BaseModel):
     url: str
 
 
-@router.post("/", summary="네이버 블로그 크롤링", description="네이버 블로그의 내용을 크롤링하여 반환합니다.")
+@router.post("", summary="네이버 블로그 크롤링", description="네이버 블로그의 내용을 크롤링하여 반환합니다.")
 async def crawl(data: BlogRequest):
     blog_url = data.url
 
