@@ -20,9 +20,7 @@ async def generate_video(request: VideoRequest):
         raise HTTPException(status_code=400, detail="유효하지 않은 summaryId")
     
     # VideoService 호출하여 비디오 생성
-    video_id = request.summaryId  # 실제로는 DB에서 생성된 ID 사용
-    video_path = generate_video_file(video_id)
-
-    video_url = f"http://localhost:5001/videos/{os.path.basename(video_path)}"
+    video_id = request.summaryId
+    video_url = generate_video_file(video_id)
     
     return VideoResponse(videoId=video_id, status="COMPLETED", videoUrl=video_url)
