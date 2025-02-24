@@ -2,7 +2,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from services.tts_service import generate_tts
 from fastapi.responses import FileResponse
-from enums import VoiceName
 
 router = APIRouter()
 
