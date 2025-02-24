@@ -10,7 +10,7 @@ router = APIRouter()
 class TTSRequest(BaseModel):
     text: str = "안녕하세요. 반갑습니다."
     language_code: str = "ko-KR"
-    voice_name: VoiceName
+    voice_name: str = "ko-KR-Standard-C"
 
 
 @router.post("/generate", summary="TTS 변환", description="텍스트를 음성으로 변환하여 다운로드 가능한 URL 반환\n\n음성 옵션:\n- 남성 음성 1: ko-KR-Standard-C\n- 남성 음성 2: ko-KR-Standard-D\n- 여성 음성 1: ko-KR-Standard-A\n- 여성 음성 2: ko-KR-Standard-B")

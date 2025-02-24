@@ -27,5 +27,4 @@ def generate_video_file(video_id: int) -> str:
     video = CompositeVideoClip([text_clip])
     video.write_videofile(video_filename, fps=24, codec="libx264")
 
-    # 클라우드 환경의 도메인을 사용하여 URL 생성
     return f"{DOMAIN_URL}/videos/{unique_filename}"
