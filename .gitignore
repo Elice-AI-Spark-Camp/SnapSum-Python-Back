@@ -36,3 +36,6 @@ pip-delete-this-directory.txt
 dist/
 build/
 tree
+src/tts_audio
+src/videos/
+src/videos/*
