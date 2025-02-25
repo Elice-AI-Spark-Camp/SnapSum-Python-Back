@@ -37,5 +37,6 @@ dist/
 build/
 tree
 src/tts_audio
+src/tts_audio/*
 src/videos/
 src/videos/*
