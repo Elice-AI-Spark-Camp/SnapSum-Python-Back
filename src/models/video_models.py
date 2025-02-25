@@ -7,8 +7,9 @@ class Paragraph(BaseModel):
 
 class VideoRequest(BaseModel):
     summaryId: int = Field(..., description="요약 ID", example=1)
-    paragraphs: List[Paragraph] = Field(..., description="문단 목록")
-    voiceId: str = Field(..., description="TTS 음성 ID", example="ko-KR-Standard-A")
+    paragraphs: List[str] = Field(..., description="문단 텍스트 목록", 
+                                 example=["첫 번째 문단입니다.", "두 번째 문단입니다."])
+    voice: str = Field(..., description="TTS 음성 ID", example="ko-KR-Standard-A")
     imageUrls: Dict[str, str] = Field(..., description="문단 인덱스와 이미지 URL 매핑", 
                                      example={"0": "https://picsum.photos/800/600", 
                                               "1": "https://picsum.photos/800/600?random=1"})
@@ -17,11 +18,8 @@ class VideoRequest(BaseModel):
         schema_extra = {
             "example": {
                 "summaryId": 1,
-                "paragraphs": [
-                    {"text": "첫 번째 문단입니다. 이 문단은 비디오의 첫 부분에 나타납니다.", "index": 0},
-                    {"text": "두 번째 문단입니다. 이 문단은 비디오의 두 번째 부분에 나타납니다.", "index": 1}
-                ],
-                "voiceId": "ko-KR-Standard-A",
+                "paragraphs": ["첫 번째 문단입니다.", "두 번째 문단입니다."],
+                "voice": "ko-KR-Standard-A",
                 "imageUrls": {
                     "0": "https://picsum.photos/800/600",
                     "1": "https://picsum.photos/800/600?random=1"
