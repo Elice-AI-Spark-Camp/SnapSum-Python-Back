@@ -12,8 +12,8 @@ router = APIRouter()
              response_model=VideoResponse, 
              description="문단별 텍스트와 이미지를 사용하여 TTS 음성이 포함된 비디오를 생성합니다.\n\n"
                         "- summaryId: 요약 ID (스프링 백엔드에서 제공)\n"
-                        "- paragraphs: 문단별 텍스트와 인덱스\n"
-                        "- voiceId: TTS 음성 ID (ko-KR-Standard-A, ko-KR-Standard-B, ko-KR-Standard-C, ko-KR-Standard-D)\n"
+                        "- paragraphs: 문단별 텍스트 목록\n"
+                        "- voice: TTS 음성 ID (ko-KR-Standard-A, ko-KR-Standard-B, ko-KR-Standard-C, ko-KR-Standard-D)\n"
                         "- imageUrls: 문단 인덱스와 이미지 URL 매핑",
              responses={
                  200: {
@@ -65,7 +65,7 @@ async def generate_video(request: VideoRequest):
     video_url = await generate_video_with_tts_and_images(
         request.summaryId,
         request.paragraphs,
-        request.voiceId,
+        request.voice,
         request.imageUrls
     )
     
