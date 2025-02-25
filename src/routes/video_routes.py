@@ -1,17 +1,8 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from services.video_service import generate_video_file
-import os
+from services.video_service import generate_video_with_tts_and_images
+from models.video_models import VideoRequest, VideoResponse
 
 router = APIRouter()
-
-class VideoRequest(BaseModel):
-    summaryId: int
-
-class VideoResponse(BaseModel):
-    videoId: int
-    status: str
-    videoUrl: str
 
 @router.post("/generate", response_model=VideoResponse)
 async def generate_video(request: VideoRequest):
@@ -19,8 +10,12 @@ async def generate_video(request: VideoRequest):
     if request.summaryId <= 0:
         raise HTTPException(status_code=400, detail="유효하지 않은 summaryId")
     
-    # VideoService 호출하여 비디오 생성
-    video_id = request.summaryId
-    video_url = generate_video_file(video_id)
+    # 비디오 생성 서비스 호출
+    video_url = await generate_video_with_tts_and_images(
+        request.summaryId,
+        request.paragraphs,
+        request.voiceId,
+        request.imageUrls
+    )
     
-    return VideoResponse(videoId=video_id, status="COMPLETED", videoUrl=video_url)
+    return VideoResponse(videoId=request.summaryId, status="COMPLETED", videoUrl=video_url)
