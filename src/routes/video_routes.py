@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Dict
-from services.video_service import generate_video_with_tts_and_images, Paragraph
+from services.video_service import generate_video_with_tts_and_images
 from models.video_models import VideoRequest, VideoResponse
 
 router = APIRouter()
