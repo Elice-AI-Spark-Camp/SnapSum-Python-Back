@@ -18,8 +18,7 @@ load_dotenv(dotenv_path=dotenv_path, override=True)
 # 환경변수에서 API 키와 도메인 가져오기
 ELICE_TTS_API_KEY = os.getenv("TTS_API_KEY")
 ELICE_TTS_API_URL = os.getenv("TTS_API_URL")
-# DOMAIN_URL = os.getenv("DOMAIN_URL", "http://localhost:5001")  # 기본값 설정
-DOMAIN_URL = "http://localhost:5001"
+DOMAIN_URL = os.getenv("DOMAIN_URL", "http://localhost:5001")
 
 TTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tts_audio")
 os.makedirs(TTS_DIR, exist_ok=True)
