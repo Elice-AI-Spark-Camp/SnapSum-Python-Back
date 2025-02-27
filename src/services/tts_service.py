@@ -4,7 +4,7 @@ import requests
 import uuid
 import json
 from fastapi import HTTPException
-from dotenv import load_dotenv, find_dotenv, dotenv_values
+from dotenv import load_dotenv
 
 # 기존 환경 변수 초기화 (이미 로드된 값 무시)
 os.environ.pop("TTS_API_KEY", None)
