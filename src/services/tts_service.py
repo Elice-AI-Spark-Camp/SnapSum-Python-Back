@@ -58,7 +58,6 @@ def generate_tts(text: str, language_code: str, voice_name: str) -> str:
 
     try:
         response_json = response.json()
-        print(f"TTS API 응답 본문: {json.dumps(response_json)}")
         
         # 응답 구조 확인
         if "audioContent" in response_json:
