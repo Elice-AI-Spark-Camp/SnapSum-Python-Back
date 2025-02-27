@@ -90,137 +90,6 @@ async def download_image(session, url, dest_path):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"이미지 다운로드 실패: {str(e)}")
 
-def create_subtitle_image(text, width, height, font_size=30, font_path=NANUM_GOTHIC_FONT):
-    """PIL을 사용하여 자막 이미지 생성"""
-    try:
-        # 투명한 배경의 이미지 생성
-        img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        
-        # 폰트 로드
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-            print(f"폰트 로드 성공: {font_path}")
-        except Exception as e:
-            print(f"폰트 로드 오류: {str(e)}")
-            # 기본 폰트 사용
-            print("기본 폰트 사용")
-            font = None
-        
-        # 텍스트 크기 계산
-        try:
-            if font:
-                text_bbox = draw.textbbox((0, 0), text, font=font)
-                text_width = text_bbox[2] - text_bbox[0]
-                text_height = text_bbox[3] - text_bbox[1]
-                print(f"텍스트 크기: {text_width}x{text_height}")
-            else:
-                # 폰트가 없는 경우 대략적인 크기 추정
-                text_width = len(text) * font_size // 2
-                text_height = font_size
-        except Exception as e:
-            print(f"텍스트 크기 계산 오류: {str(e)}")
-            # 기본값 사용
-            text_width = min(len(text) * font_size // 2, width - 40)
-            text_height = font_size
-            print(f"텍스트 크기 기본값 사용: {text_width}x{text_height}")
-        
-        # 텍스트가 너무 길면 여러 줄로 나누기
-        max_width = width - 80  # 양쪽 여백 40px씩
-        
-        if text_width > max_width and font:
-            # 텍스트를 단어 단위로 분할
-            words = text.split()
-            lines = []
-            current_line = ""
-            
-            for word in words:
-                test_line = current_line + " " + word if current_line else word
-                test_bbox = draw.textbbox((0, 0), test_line, font=font)
-                test_width = test_bbox[2] - test_bbox[0]
-                
-                if test_width <= max_width:
-                    current_line = test_line
-                else:
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = word
-            
-            if current_line:
-                lines.append(current_line)
-            
-            # 여러 줄이 없으면 원본 텍스트 사용
-            if not lines:
-                lines = [text]
-            
-            # 모든 줄의 높이 계산
-            total_text_height = 0
-            line_heights = []
-            
-            for line in lines:
-                line_bbox = draw.textbbox((0, 0), line, font=font)
-                line_height = line_bbox[3] - line_bbox[1]
-                line_heights.append(line_height)
-                total_text_height += line_height
-            
-            # 줄 간격 추가
-            line_spacing = 5
-            total_text_height += line_spacing * (len(lines) - 1)
-            
-            # 배경 크기 및 위치 계산
-            padding = 20
-            bg_width = max_width + padding * 2
-            bg_height = total_text_height + padding * 2
-            
-            bg_left = (width - bg_width) // 2
-            bg_top = height - bg_height - 30
-            bg_right = bg_left + bg_width
-            bg_bottom = bg_top + bg_height
-            
-            # 배경 그리기 (반투명 검정)
-            draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
-            
-            # 각 줄 그리기
-            y_offset = bg_top + padding
-            
-            for i, line in enumerate(lines):
-                line_bbox = draw.textbbox((0, 0), line, font=font)
-                line_width = line_bbox[2] - line_bbox[0]
-                
-                # 각 줄을 중앙 정렬
-                text_x = bg_left + (bg_width - line_width) // 2
-                draw.text((text_x, y_offset), line, font=font, fill=(255, 255, 255, 255))
-                
-                y_offset += line_heights[i] + line_spacing
-        else:
-            # 한 줄로 표시 가능한 경우
-            padding = 20
-            bg_width = min(text_width + padding * 2, width - 40)
-            bg_height = text_height + padding * 2
-            
-            # 텍스트 위치 (하단 중앙)
-            bg_left = (width - bg_width) // 2
-            bg_top = height - bg_height - 30
-            bg_right = bg_left + bg_width
-            bg_bottom = bg_top + bg_height
-            
-            # 배경 그리기 (반투명 검정)
-            draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
-            
-            # 텍스트 그리기 (흰색)
-            if font:
-                text_x = bg_left + (bg_width - text_width) // 2
-                text_y = bg_top + (bg_height - text_height) // 2
-                draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
-        
-        # PIL 이미지를 numpy 배열로 변환
-        return np.array(img)
-    
-    except Exception as e:
-        print(f"자막 이미지 생성 오류: {str(e)}")
-        # 오류 발생 시 빈 이미지 반환
-        return np.zeros((height, width, 4), dtype=np.uint8)
-
 async def generate_video_with_tts_and_images(
     summary_id: int,
     paragraphs: List[str],
@@ -228,7 +97,7 @@ async def generate_video_with_tts_and_images(
     image_urls: Dict[str, str]
 ) -> str:
     """TTS와 이미지를 사용하여 비디오 생성"""
-    
+
     # 임시 디렉토리 생성
     with tempfile.TemporaryDirectory() as temp_dir:
         clips = []
@@ -271,22 +140,8 @@ async def generate_video_with_tts_and_images(
                 # 오디오 길이에 맞게 비디오 길이 조정
                 video_clip = video_clip.set_duration(audio_clip.duration)
                 
-                # PIL을 사용하여 자막 이미지 생성
-                subtitle_img = create_subtitle_image(
-                    paragraph, 
-                    image_clip.w, 
-                    image_clip.h, 
-                    font_path=NANUM_GOTHIC_FONT
-                )
-                
-                # 자막 이미지를 ImageClip으로 변환
-                subtitle_clip = ImageClip(subtitle_img, transparent=True)
-                subtitle_clip = subtitle_clip.set_duration(audio_clip.duration)
-                
-                # 모든 클립 합성
-                print(f"자막 클립을 비디오에 합성합니다.")
-                final_clip = CompositeVideoClip([video_clip, subtitle_clip])
-                clips.append(final_clip)
+                # 비디오 클립 추가
+                clips.append(video_clip)
                 
             except Exception as e:
                 print(f"문단 {i} 처리 중 오류 발생: {str(e)}")
