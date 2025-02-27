@@ -2,13 +2,19 @@ import os
 import uuid
 import aiohttp
 import tempfile
+import re
+import asyncio
+import subprocess
 from typing import List, Dict
 from datetime import datetime
-from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip, TextClip
+from moviepy.editor import ImageClip, AudioFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
 from dotenv import load_dotenv
 from services.tts_service import generate_tts
 from models.video_models import Paragraph
 from fastapi import HTTPException
+from pydantic import BaseModel
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 # .env 로드
 load_dotenv()
@@ -21,19 +27,123 @@ os.makedirs(VIDEO_DIR, exist_ok=True)
 # 대체 이미지 경로
 DEFAULT_IMAGE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "default_image.jpg")
 
-async def download_image(url: str, temp_dir: str) -> str:
+# 나눔 고딕 폰트 경로 설정
+NANUM_GOTHIC_FONT = os.path.expanduser("~/Library/Fonts/NanumGothic-Regular.ttf")
+print(f"나눔 고딕 폰트 경로: {NANUM_GOTHIC_FONT}")
+print(f"폰트 파일 존재 여부: {os.path.exists(NANUM_GOTHIC_FONT)}")
+
+class Paragraph(BaseModel):
+    text: str
+    image_url: str
+
+def split_paragraph_into_sentences(paragraph):
+    """문단을 문장으로 분리하는 함수"""
+    # 한국어 문장 분리 패턴 (마침표, 느낌표, 물음표 뒤에 공백이 있는 경우)
+    sentences = re.split(r'([.!?]\s)', paragraph)
+    result = []
+    i = 0
+    
+    while i < len(sentences) - 1:
+        if i + 1 < len(sentences) and re.match(r'[.!?]\s', sentences[i + 1]):
+            result.append(sentences[i] + sentences[i + 1])
+            i += 2
+        else:
+            result.append(sentences[i])
+            i += 1
+    
+    if i < len(sentences):
+        result.append(sentences[i])
+    
+    # 빈 문자열 제거 및 공백 제거
+    result = [s.strip() for s in result if s.strip()]
+    
+    # 결과가 없으면 원본 문단을 그대로 반환
+    if not result:
+        return [paragraph]
+    
+    return result
+
+def calculate_sentence_durations(sentences, total_duration):
+    """각 문장의 예상 지속 시간을 계산하는 함수"""
+    total_chars = sum(len(s) for s in sentences)
+    durations = []
+    
+    for sentence in sentences:
+        # 문장 길이에 비례하여 시간 할당 (최소 1초)
+        ratio = len(sentence) / total_chars if total_chars > 0 else 1 / len(sentences)
+        duration = max(ratio * total_duration, 1.0)
+        durations.append(duration)
+    
+    return durations
+
+async def download_image(session, url, dest_path):
     """이미지 URL에서 이미지 다운로드"""
-    async with aiohttp.ClientSession() as session:
+    try:
         async with session.get(url) as response:
             if response.status != 200:
-                raise Exception(f"이미지 다운로드 실패: {url}, 상태 코드: {response.status}")
+                raise HTTPException(status_code=500, detail=f"이미지 다운로드 실패: HTTP {response.status}")
             
-            # 임시 파일 생성
-            filename = os.path.join(temp_dir, f"image_{uuid.uuid4()}.jpg")
-            with open(filename, 'wb') as f:
+            with open(dest_path, 'wb') as f:
                 f.write(await response.read())
             
-            return filename
+            return dest_path
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"이미지 다운로드 실패: {str(e)}")
+
+def create_subtitle_image(text, width, height, font_path=NANUM_GOTHIC_FONT, font_size=30):
+    """자막 이미지 생성 함수"""
+    # 투명한 배경의 이미지 생성
+    img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    
+    # 폰트 로드
+    try:
+        if os.path.exists(font_path):
+            font = ImageFont.truetype(font_path, font_size)
+            print(f"폰트 로드 성공: {font_path}")
+        else:
+            # macOS 기본 한글 폰트 사용
+            font = ImageFont.truetype("AppleGothic", font_size)
+            print("AppleGothic 폰트 사용")
+    except Exception as e:
+        print(f"폰트 로드 오류: {str(e)}")
+        # 기본 폰트 사용
+        font = ImageFont.load_default()
+        print("기본 폰트 사용")
+    
+    # 텍스트 크기 계산
+    try:
+        text_width, text_height = draw.textsize(text, font=font)
+        print(f"텍스트 크기 계산 방법 1: {text_width}x{text_height}")
+    except:
+        # 최신 Pillow 버전에서는 다른 메서드 사용
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            print(f"텍스트 크기 계산 방법 2: {text_width}x{text_height}")
+        except Exception as e:
+            print(f"텍스트 크기 계산 오류: {str(e)}")
+            text_width = width // 2
+            text_height = font_size
+            print(f"텍스트 크기 기본값 사용: {text_width}x{text_height}")
+    
+    # 텍스트 위치 계산 (하단 중앙 정렬)
+    position = ((width - text_width) // 2, height - text_height - 20)
+    
+    # 텍스트 배경 (반투명 검정)
+    bg_left = max(0, position[0] - 10)
+    bg_top = max(0, position[1] - 5)
+    bg_right = min(width, position[0] + text_width + 10)
+    bg_bottom = min(height, position[1] + text_height + 5)
+    draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
+    
+    # 텍스트 그리기
+    draw.text(position, text, font=font, fill=(255, 255, 255, 255))
+    print(f"텍스트 그리기 완료: '{text[:30]}...'")
+    
+    # PIL 이미지를 numpy 배열로 변환
+    return np.array(img)
 
 async def generate_video_with_tts_and_images(
     summary_id: int,
@@ -62,63 +172,19 @@ async def generate_video_with_tts_and_images(
             # TTS 생성
             try:
                 audio_url = generate_tts(paragraph, "ko-KR", voice_id)
-                audio_path = audio_url.replace(f"{DOMAIN_URL}/", "")
                 
                 # 이미지 다운로드
                 image_path = os.path.join(temp_dir, f"image_{i}.jpg")
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(image_url) as response:
-                            if response.status == 200:
-                                with open(image_path, "wb") as f:
-                                    f.write(await response.read())
-                            else:
-                                print(f"이미지 다운로드 실패: {image_url}, 상태 코드: {response.status}")
-                                # 대체 이미지 사용
-                                if os.path.exists(DEFAULT_IMAGE_PATH):
-                                    image_path = DEFAULT_IMAGE_PATH
-                                else:
-                                    # 텍스트 클립 생성
-                                    text_clip = TextClip(
-                                        f"이미지를 찾을 수 없습니다.\n\n{paragraph}",
-                                        fontsize=30, color="white", bg_color="black",
-                                        size=(1280, 720), method="caption"
-                                    ).set_duration(5)
-                                    
-                                    # 오디오 클립 생성
-                                    audio_clip = AudioFileClip(audio_path)
-                                    
-                                    # 텍스트 클립에 오디오 추가
-                                    video_clip = text_clip.set_audio(audio_clip)
-                                    video_clip = video_clip.set_duration(audio_clip.duration)
-                                    
-                                    clips.append(video_clip)
-                                    continue
-                except Exception as e:
-                    print(f"이미지 다운로드 중 오류 발생: {str(e)}")
-                    # 대체 이미지 또는 텍스트 클립 사용
-                    if os.path.exists(DEFAULT_IMAGE_PATH):
-                        image_path = DEFAULT_IMAGE_PATH
-                    else:
-                        # 텍스트 클립 생성
-                        text_clip = TextClip(
-                            f"이미지를 찾을 수 없습니다.\n\n{paragraph}",
-                            fontsize=30, color="white", bg_color="black",
-                            size=(1280, 720), method="caption"
-                        ).set_duration(5)
-                        
-                        # 오디오 클립 생성
-                        audio_clip = AudioFileClip(audio_path)
-                        
-                        # 텍스트 클립에 오디오 추가
-                        video_clip = text_clip.set_audio(audio_clip)
-                        video_clip = video_clip.set_duration(audio_clip.duration)
-                        
-                        clips.append(video_clip)
-                        continue
+                async with aiohttp.ClientSession() as session:
+                    await download_image(session, image_url, image_path)
+                
+                # 오디오 다운로드
+                audio_path = os.path.join(temp_dir, f"audio_{i}.wav")
+                async with aiohttp.ClientSession() as session:
+                    await download_image(session, audio_url, audio_path)
                 
                 # 이미지 클립 생성
-                image_clip = ImageClip(image_path).set_duration(5)
+                image_clip = ImageClip(image_path)
                 
                 # 오디오 클립 생성
                 audio_clip = AudioFileClip(audio_path)
@@ -129,45 +195,55 @@ async def generate_video_with_tts_and_images(
                 # 오디오 길이에 맞게 비디오 길이 조정
                 video_clip = video_clip.set_duration(audio_clip.duration)
                 
-                clips.append(video_clip)
+                # PIL을 사용하여 자막 이미지 생성
+                subtitle_img = create_subtitle_image(
+                    paragraph, 
+                    image_clip.w, 
+                    image_clip.h, 
+                    font_path=NANUM_GOTHIC_FONT
+                )
+                
+                # 자막 이미지를 ImageClip으로 변환
+                subtitle_clip = ImageClip(subtitle_img, transparent=True)
+                subtitle_clip = subtitle_clip.set_duration(audio_clip.duration)
+                
+                # 모든 클립 합성
+                print(f"자막 클립을 비디오에 합성합니다.")
+                final_clip = CompositeVideoClip([video_clip, subtitle_clip])
+                clips.append(final_clip)
                 
             except Exception as e:
-                print(f"TTS 생성 중 오류 발생: {str(e)}")
-                # 오류 발생 시 텍스트 클립 생성
-                text_clip = TextClip(
-                    f"오디오를 생성할 수 없습니다.\n\n{paragraph}",
-                    fontsize=30, color="white", bg_color="black",
-                    size=(1280, 720), method="caption"
-                ).set_duration(5)
-                
-                clips.append(text_clip)
+                print(f"문단 {i} 처리 중 오류 발생: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"비디오 생성 중 오류 발생: {str(e)}")
         
         if not clips:
-            # 클립이 없는 경우 기본 텍스트 클립 생성
-            text_clip = TextClip(
-                "비디오를 생성할 수 없습니다.\n\n문단이 없거나 모든 문단 처리에 실패했습니다.",
-                fontsize=30, color="white", bg_color="black",
-                size=(1280, 720), method="caption"
-            ).set_duration(5)
-            
-            clips.append(text_clip)
+            raise HTTPException(status_code=500, detail="생성할 비디오 클립이 없습니다.")
         
         # 모든 클립 연결
-        final_clip = concatenate_videoclips(clips)
+        final_video = concatenate_videoclips(clips)
         
         # 고유한 파일명 생성
-        unique_filename = f"video_{uuid.uuid4()}.mp4"
-        video_filename = os.path.join(VIDEO_DIR, unique_filename)
+        video_filename = f"video_{uuid.uuid4()}.mp4"
+        video_path = os.path.join(VIDEO_DIR, video_filename)
         
-        # 비디오 파일 생성
-        final_clip.write_videofile(
-            video_filename, 
-            fps=24, 
-            codec="libx264",
-            audio_codec="aac"
-        )
+        # 비디오 저장
+        try:
+            print(f"최종 비디오 저장 시작: {video_path}")
+            final_video.write_videofile(
+                video_path,
+                codec='libx264',
+                audio_codec='aac',
+                temp_audiofile=os.path.join(temp_dir, 'temp_audio.m4a'),
+                remove_temp=True,
+                fps=24
+            )
+            print(f"최종 비디오 저장 완료: {video_path}")
+        except Exception as e:
+            print(f"비디오 저장 중 오류 발생: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"비디오 저장 중 오류 발생: {str(e)}")
         
-        return f"{DOMAIN_URL}/videos/{unique_filename}"
+        # 비디오 URL 반환
+        return f"{DOMAIN_URL}/videos/{video_filename}"
 
 def generate_video_file(video_id: int) -> str:
     """MoviePy를 사용하여 비디오를 생성하는 함수"""
