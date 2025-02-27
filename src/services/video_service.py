@@ -28,7 +28,7 @@ os.makedirs(VIDEO_DIR, exist_ok=True)
 DEFAULT_IMAGE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "default_image.jpg")
 
 # 나눔 고딕 폰트 경로 설정
-NANUM_GOTHIC_FONT = os.path.expanduser("~/Library/Fonts/NanumGothic-Regular.ttf")
+NANUM_GOTHIC_FONT = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
 print(f"나눔 고딕 폰트 경로: {NANUM_GOTHIC_FONT}")
 print(f"폰트 파일 존재 여부: {os.path.exists(NANUM_GOTHIC_FONT)}")
 
@@ -90,60 +90,68 @@ async def download_image(session, url, dest_path):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"이미지 다운로드 실패: {str(e)}")
 
-def create_subtitle_image(text, width, height, font_path=NANUM_GOTHIC_FONT, font_size=30):
-    """자막 이미지 생성 함수"""
-    # 투명한 배경의 이미지 생성
-    img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    
-    # 폰트 로드
+def create_subtitle_image(text, width, height, font_size=30, font_path=NANUM_GOTHIC_FONT):
+    """PIL을 사용하여 자막 이미지 생성"""
     try:
-        if os.path.exists(font_path):
+        # 투명한 배경의 이미지 생성
+        img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        # 폰트 로드
+        try:
             font = ImageFont.truetype(font_path, font_size)
             print(f"폰트 로드 성공: {font_path}")
-        else:
-            # macOS 기본 한글 폰트 사용
-            font = ImageFont.truetype("AppleGothic", font_size)
-            print("AppleGothic 폰트 사용")
-    except Exception as e:
-        print(f"폰트 로드 오류: {str(e)}")
-        # 기본 폰트 사용
-        font = ImageFont.load_default()
-        print("기본 폰트 사용")
-    
-    # 텍스트 크기 계산
-    try:
-        text_width, text_height = draw.textsize(text, font=font)
-        print(f"텍스트 크기 계산 방법 1: {text_width}x{text_height}")
-    except:
-        # 최신 Pillow 버전에서는 다른 메서드 사용
+        except Exception as e:
+            print(f"폰트 로드 오류: {str(e)}")
+            # 기본 폰트 사용
+            print("기본 폰트 사용")
+            font = None
+        
+        # 텍스트 크기 계산
         try:
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            print(f"텍스트 크기 계산 방법 2: {text_width}x{text_height}")
+            if font:
+                text_bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
+                print(f"텍스트 크기: {text_width}x{text_height}")
+            else:
+                # 폰트가 없는 경우 대략적인 크기 추정
+                text_width = len(text) * font_size // 2
+                text_height = font_size
         except Exception as e:
             print(f"텍스트 크기 계산 오류: {str(e)}")
-            text_width = width // 2
+            # 기본값 사용
+            text_width = min(len(text) * font_size // 2, width - 40)
             text_height = font_size
             print(f"텍스트 크기 기본값 사용: {text_width}x{text_height}")
+        
+        # 텍스트 배경 영역 계산
+        padding = 20
+        bg_width = min(text_width + padding * 2, width - 40)
+        bg_height = text_height + padding
+        
+        # 텍스트 위치 (하단 중앙)
+        bg_left = (width - bg_width) // 2
+        bg_top = height - bg_height - 30
+        bg_right = bg_left + bg_width
+        bg_bottom = bg_top + bg_height
+        
+        # 배경 그리기 (반투명 검정)
+        draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
+        
+        # 텍스트 그리기 (흰색)
+        if font:
+            text_x = bg_left + padding
+            text_y = bg_top + (bg_height - text_height) // 2
+            draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
+        
+        # PIL 이미지를 numpy 배열로 변환
+        return np.array(img)
     
-    # 텍스트 위치 계산 (하단 중앙 정렬)
-    position = ((width - text_width) // 2, height - text_height - 20)
-    
-    # 텍스트 배경 (반투명 검정)
-    bg_left = max(0, position[0] - 10)
-    bg_top = max(0, position[1] - 5)
-    bg_right = min(width, position[0] + text_width + 10)
-    bg_bottom = min(height, position[1] + text_height + 5)
-    draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
-    
-    # 텍스트 그리기
-    draw.text(position, text, font=font, fill=(255, 255, 255, 255))
-    print(f"텍스트 그리기 완료: '{text[:30]}...'")
-    
-    # PIL 이미지를 numpy 배열로 변환
-    return np.array(img)
+    except Exception as e:
+        print(f"자막 이미지 생성 오류: {str(e)}")
+        # 오류 발생 시 빈 이미지 반환
+        return np.zeros((height, width, 4), dtype=np.uint8)
 
 async def generate_video_with_tts_and_images(
     summary_id: int,
@@ -169,14 +177,14 @@ async def generate_video_with_tts_and_images(
                 print(f"문단 {idx_str}에 대한 이미지 URL이 없습니다.")
                 continue
             
-            # TTS 생성
             try:
-                audio_url = generate_tts(paragraph, "ko-KR", voice_id)
-                
                 # 이미지 다운로드
                 image_path = os.path.join(temp_dir, f"image_{i}.jpg")
                 async with aiohttp.ClientSession() as session:
                     await download_image(session, image_url, image_path)
+                
+                # TTS 생성
+                audio_url = generate_tts(paragraph, "ko-KR", voice_id)
                 
                 # 오디오 다운로드
                 audio_path = os.path.join(temp_dir, f"audio_{i}.wav")
