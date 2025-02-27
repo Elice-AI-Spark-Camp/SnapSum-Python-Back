@@ -4,15 +4,22 @@ import requests
 import uuid
 import json
 from fastapi import HTTPException
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv, dotenv_values
 
-# .env 로드
-load_dotenv()
+# 기존 환경 변수 초기화 (이미 로드된 값 무시)
+os.environ.pop("TTS_API_KEY", None)
+os.environ.pop("TTS_API_URL", None)
+os.environ.pop("DOMAIN_URL", None)
+
+# .env 파일 로드 - 절대 경로 사용
+dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '.env')
+load_dotenv(dotenv_path=dotenv_path, override=True)
 
 # 환경변수에서 API 키와 도메인 가져오기
 ELICE_TTS_API_KEY = os.getenv("TTS_API_KEY")
 ELICE_TTS_API_URL = os.getenv("TTS_API_URL")
-DOMAIN_URL = os.getenv("DOMAIN_URL", "http://localhost:5001")  # 기본값 설정
+# DOMAIN_URL = os.getenv("DOMAIN_URL", "http://localhost:5001")  # 기본값 설정
+DOMAIN_URL = "http://localhost:5001"
 
 TTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tts_audio")
 os.makedirs(TTS_DIR, exist_ok=True)
@@ -32,18 +39,17 @@ def generate_tts(text: str, language_code: str, voice_name: str) -> str:
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
-        "Authorization": f"{ELICE_TTS_API_KEY}"
+        "Authorization": ELICE_TTS_API_KEY  # 환경 변수에서 직접 가져온 값 사용
     }
 
     # 디버깅을 위한 로그 추가
     print(f"TTS API 요청: {ELICE_TTS_API_URL}")
     print(f"TTS API 페이로드: {json.dumps(payload)}")
-    
     response = requests.post(ELICE_TTS_API_URL, json=payload, headers=headers)
 
     # 디버깅을 위한 응답 로그 추가
     print(f"TTS API 응답 상태 코드: {response.status_code}")
-    print(f"TTS API 응답 헤더: {response.headers}")
+
     
     if response.status_code != 200:
         error_message = f"TTS 변환 실패: API 응답 오류 ({response.status_code})"
