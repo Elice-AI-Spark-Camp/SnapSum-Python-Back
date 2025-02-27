@@ -125,25 +125,93 @@ def create_subtitle_image(text, width, height, font_size=30, font_path=NANUM_GOT
             text_height = font_size
             print(f"텍스트 크기 기본값 사용: {text_width}x{text_height}")
         
-        # 텍스트 배경 영역 계산
-        padding = 20
-        bg_width = min(text_width + padding * 2, width - 40)
-        bg_height = text_height + padding
+        # 텍스트가 너무 길면 여러 줄로 나누기
+        max_width = width - 80  # 양쪽 여백 40px씩
         
-        # 텍스트 위치 (하단 중앙)
-        bg_left = (width - bg_width) // 2
-        bg_top = height - bg_height - 30
-        bg_right = bg_left + bg_width
-        bg_bottom = bg_top + bg_height
-        
-        # 배경 그리기 (반투명 검정)
-        draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
-        
-        # 텍스트 그리기 (흰색)
-        if font:
-            text_x = bg_left + padding
-            text_y = bg_top + (bg_height - text_height) // 2
-            draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
+        if text_width > max_width and font:
+            # 텍스트를 단어 단위로 분할
+            words = text.split()
+            lines = []
+            current_line = ""
+            
+            for word in words:
+                test_line = current_line + " " + word if current_line else word
+                test_bbox = draw.textbbox((0, 0), test_line, font=font)
+                test_width = test_bbox[2] - test_bbox[0]
+                
+                if test_width <= max_width:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            
+            if current_line:
+                lines.append(current_line)
+            
+            # 여러 줄이 없으면 원본 텍스트 사용
+            if not lines:
+                lines = [text]
+            
+            # 모든 줄의 높이 계산
+            total_text_height = 0
+            line_heights = []
+            
+            for line in lines:
+                line_bbox = draw.textbbox((0, 0), line, font=font)
+                line_height = line_bbox[3] - line_bbox[1]
+                line_heights.append(line_height)
+                total_text_height += line_height
+            
+            # 줄 간격 추가
+            line_spacing = 5
+            total_text_height += line_spacing * (len(lines) - 1)
+            
+            # 배경 크기 및 위치 계산
+            padding = 20
+            bg_width = max_width + padding * 2
+            bg_height = total_text_height + padding * 2
+            
+            bg_left = (width - bg_width) // 2
+            bg_top = height - bg_height - 30
+            bg_right = bg_left + bg_width
+            bg_bottom = bg_top + bg_height
+            
+            # 배경 그리기 (반투명 검정)
+            draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
+            
+            # 각 줄 그리기
+            y_offset = bg_top + padding
+            
+            for i, line in enumerate(lines):
+                line_bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = line_bbox[2] - line_bbox[0]
+                
+                # 각 줄을 중앙 정렬
+                text_x = bg_left + (bg_width - line_width) // 2
+                draw.text((text_x, y_offset), line, font=font, fill=(255, 255, 255, 255))
+                
+                y_offset += line_heights[i] + line_spacing
+        else:
+            # 한 줄로 표시 가능한 경우
+            padding = 20
+            bg_width = min(text_width + padding * 2, width - 40)
+            bg_height = text_height + padding * 2
+            
+            # 텍스트 위치 (하단 중앙)
+            bg_left = (width - bg_width) // 2
+            bg_top = height - bg_height - 30
+            bg_right = bg_left + bg_width
+            bg_bottom = bg_top + bg_height
+            
+            # 배경 그리기 (반투명 검정)
+            draw.rectangle([bg_left, bg_top, bg_right, bg_bottom], fill=(0, 0, 0, 180))
+            
+            # 텍스트 그리기 (흰색)
+            if font:
+                text_x = bg_left + (bg_width - text_width) // 2
+                text_y = bg_top + (bg_height - text_height) // 2
+                draw.text((text_x, text_y), text, font=font, fill=(255, 255, 255, 255))
         
         # PIL 이미지를 numpy 배열로 변환
         return np.array(img)
