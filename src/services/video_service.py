@@ -7,7 +7,6 @@ import subprocess
 import hashlib
 import io
 import time
-import psutil
 from typing import List, Dict
 from fastapi import HTTPException
 from dotenv import load_dotenv
@@ -27,8 +26,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 # 시스템 리소스 확인
 CPU_COUNT = os.cpu_count() or 2
-TOTAL_MEMORY_GB = psutil.virtual_memory().total / (1024 * 1024 * 1024)
-print(f"시스템 정보: CPU {CPU_COUNT}코어, 메모리 {TOTAL_MEMORY_GB:.1f}GB")
+print(f"시스템 정보: CPU {CPU_COUNT}코어")
 
 # GPU 확인
 HAS_GPU = False
@@ -161,7 +159,6 @@ async def download_file(session, url, dest_path):
 async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality="medium"):
     """각 문단을 병렬로 처리 (캐싱 적용)"""
     try:
-        start_time = time.time()
         print(f"문단 {i} 처리 시작")
         settings = QUALITY_SETTINGS.get(quality, QUALITY_SETTINGS["medium"])
         
@@ -174,7 +171,6 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
             print(f"문단 {i}의 캐시 발견: {cache_path}")
             output_path = os.path.join(temp_dir, f"segment_{i}.mp4")
             shutil.copy(cache_path, output_path)
-            print(f"문단 {i} 캐시 처리 완료: {time.time() - start_time:.2f}초")
             return {
                 "index": i,
                 "segment_path": output_path
@@ -196,29 +192,27 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         # 세그먼트 비디오 생성
         output_path = os.path.join(temp_dir, f"segment_{i}.mp4")
         
-        # FFmpeg 명령어 구성 - GPU 가속 사용
+        # FFmpeg 명령어 구성 (GPU 가속 사용)
         if HAS_NVENC:
-            # NVIDIA GPU 하드웨어 가속 사용
             cmd = [
                 FFMPEG_PATH, "-y",
                 "-loop", "1",
                 "-i", image_path,
                 "-i", audio_path,
-                "-c:v", "h264_nvenc",  # NVIDIA 하드웨어 인코딩
+                "-c:v", "h264_nvenc",
                 "-tune", "stillimage",
                 "-c:a", "aac",
                 "-b:a", settings["audio_bitrate"],
                 "-pix_fmt", "yuv420p",
                 "-shortest",
-                "-preset", settings["preset"],  # NVENC 프리셋
-                "-b:v", settings["video_bitrate"],  # 비디오 비트레이트
-                "-rc:v", "vbr_hq",  # 가변 비트레이트, 고품질
+                "-preset", settings["preset"],
+                "-b:v", settings["video_bitrate"],
+                "-rc:v", "vbr_hq",
                 "-movflags", "+faststart",
-                "-gpu", "0",  # GPU 선택 (MIG 환경에서는 적절히 조정)
+                "-gpu", "0",
                 output_path
             ]
         else:
-            # CPU 인코딩 사용
             cmd = [
                 FFMPEG_PATH, "-y",
                 "-loop", "1",
@@ -232,13 +226,13 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                 "-shortest",
                 "-preset", settings["preset"],
                 "-crf", settings["crf"],
-                "-threads", str(min(CPU_COUNT, 2)),  # 스레드 수 제한
+                "-threads", str(min(CPU_COUNT, 2)),
                 "-movflags", "+faststart",
                 output_path
             ]
         
         # FFmpeg 실행
-        print(f"문단 {i} FFmpeg 실행 ({('GPU' if HAS_NVENC else 'CPU')} 인코딩)")
+        print(f"문단 {i} FFmpeg 실행")
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -254,8 +248,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         # 캐시 저장
         shutil.copy(output_path, cache_path)
         
-        elapsed_time = time.time() - start_time
-        print(f"문단 {i} 처리 완료: {output_path} ({elapsed_time:.2f}초)")
+        print(f"문단 {i} 처리 완료: {output_path}")
         return {
             "index": i,
             "segment_path": output_path
@@ -271,10 +264,9 @@ async def generate_video_with_tts_and_images(
     image_urls: Dict[str, str],
     quality: str = "medium"
 ) -> str:
-    """TTS와 이미지를 사용하여 비디오 생성 (GPU 가속 및 병렬 처리)"""
+    """TTS와 이미지를 사용하여 비디오 생성 (병렬 처리 및 FFmpeg 사용)"""
     start_time = time.time()
     print(f"비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}, 품질={quality}")
-    print(f"GPU 가속: {HAS_NVENC}")
     
     # 임시 디렉토리 생성
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -294,7 +286,7 @@ async def generate_video_with_tts_and_images(
         
         print(f"총 {len(tasks)}개의 문단 처리 태스크 생성")
         
-        # 세마포어를 사용하여 동시 작업 수 제한
+        # 동시 실행 작업 수 제한
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
         
         async def limited_task(task_func):
