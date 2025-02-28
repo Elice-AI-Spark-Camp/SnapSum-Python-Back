@@ -29,10 +29,8 @@ def generate_tts(text: str, language_code: str, voice_name: str) -> str:
     """
     payload = {
         "text": text,
-        "voice": {
-            "languageCode": language_code,
-            "name": voice_name
-        }
+        "language_code": language_code,
+        "voice_name": voice_name
     }
 
     headers = {
