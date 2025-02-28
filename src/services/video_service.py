@@ -176,7 +176,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                 "segment_path": output_path
             }
         
-        # 이미지 다운로드 및 최적화
+        # 이미지 다운로드 및 리사이징
         image_path = os.path.join(temp_dir, f"image_{i}.jpg")
         async with aiohttp.ClientSession() as session:
             await download_and_optimize_image(session, image_url, image_path, settings["resolution"])
@@ -200,7 +200,6 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                 "-i", image_path,
                 "-i", audio_path,
                 "-c:v", "h264_nvenc",
-                "-tune", "stillimage",
                 "-c:a", "aac",
                 "-b:a", settings["audio_bitrate"],
                 "-pix_fmt", "yuv420p",
@@ -219,20 +218,19 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                 "-i", image_path,
                 "-i", audio_path,
                 "-c:v", "libx264",
-                "-tune", "stillimage",
+                "-tune", "stillimage",  # CPU 인코딩에서는 stillimage 튜닝 사용 가능
                 "-c:a", "aac",
                 "-b:a", settings["audio_bitrate"],
                 "-pix_fmt", "yuv420p",
                 "-shortest",
                 "-preset", settings["preset"],
                 "-crf", settings["crf"],
-                "-threads", str(min(CPU_COUNT, 2)),
                 "-movflags", "+faststart",
                 output_path
             ]
         
         # FFmpeg 실행
-        print(f"문단 {i} FFmpeg 실행")
+        print(f"문단 {i} FFmpeg 실행: {' '.join(cmd)}")
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -245,7 +243,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
             print(f"FFmpeg 오류 (문단 {i}): {stderr.decode()}")
             raise HTTPException(status_code=500, detail=f"비디오 세그먼트 생성 실패: {stderr.decode()}")
         
-        # 캐시 저장
+        # 캐시에 저장
         shutil.copy(output_path, cache_path)
         
         print(f"문단 {i} 처리 완료: {output_path}")
@@ -403,7 +401,6 @@ async def generate_quick_video(
                 "-i", image_path,
                 "-i", audio_path,
                 "-c:v", "h264_nvenc",
-                "-tune", "stillimage",
                 "-c:a", "aac",
                 "-b:a", settings["audio_bitrate"],
                 "-pix_fmt", "yuv420p",
