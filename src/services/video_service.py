@@ -4,8 +4,11 @@ import aiohttp
 import tempfile
 import asyncio
 import subprocess
+import hashlib
+import io
+import time
+import psutil
 from typing import List, Dict
-from datetime import datetime
 from fastapi import HTTPException
 from dotenv import load_dotenv
 from services.tts_service import generate_tts
@@ -16,34 +19,126 @@ import shutil
 load_dotenv()
 DOMAIN_URL = os.getenv("DOMAIN_URL", "http://localhost:5001")
 
-# 비디오 저장 디렉토리
+# 디렉토리 설정
 VIDEO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "videos")
+CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
 os.makedirs(VIDEO_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# 시스템 리소스 확인
+CPU_COUNT = os.cpu_count() or 2
+TOTAL_MEMORY_GB = psutil.virtual_memory().total / (1024 * 1024 * 1024)
+print(f"시스템 정보: CPU {CPU_COUNT}코어, 메모리 {TOTAL_MEMORY_GB:.1f}GB")
+
+# GPU 확인
+HAS_GPU = False
+try:
+    # nvidia-smi 명령어로 GPU 확인
+    result = subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 0:
+        HAS_GPU = True
+        print("NVIDIA GPU 감지됨, 하드웨어 가속 사용 가능")
+        
+        # CUDA 버전 확인
+        cuda_info = subprocess.run(["nvidia-smi", "--query-gpu=driver_version,cuda_version", "--format=csv,noheader"], 
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        print(f"CUDA 정보: {cuda_info.stdout.strip()}")
+except:
+    print("NVIDIA GPU를 감지할 수 없음, 소프트웨어 인코딩 사용")
 
 # FFmpeg 경로 확인
 FFMPEG_PATH = shutil.which("ffmpeg")
 if not FFMPEG_PATH:
-    raise RuntimeError("FFmpeg가 설치되어 있지 않습니다. FFmpeg를 설치해주세요.")
+    # 일반적인 FFmpeg 설치 경로 확인
+    possible_paths = [
+        "/usr/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        os.path.expanduser("~/bin/ffmpeg")
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            FFMPEG_PATH = path
+            break
+            
+    if not FFMPEG_PATH:
+        raise RuntimeError("FFmpeg가 설치되어 있지 않습니다. FFmpeg를 설치해주세요.")
+
 print(f"FFmpeg 경로: {FFMPEG_PATH}")
 
-async def download_and_resize_image(session, url, dest_path, target_resolution=(1280, 720)):
-    """이미지 다운로드 후 최적 크기로 리사이징"""
+# FFmpeg 하드웨어 가속 지원 확인
+if HAS_GPU:
+    try:
+        result = subprocess.run([FFMPEG_PATH, "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if "h264_nvenc" in result.stdout:
+            print("FFmpeg NVENC 하드웨어 가속 지원 확인됨")
+            HAS_NVENC = True
+        else:
+            print("FFmpeg NVENC 하드웨어 가속 지원되지 않음")
+            HAS_NVENC = False
+    except:
+        print("FFmpeg 인코더 확인 실패")
+        HAS_NVENC = False
+else:
+    HAS_NVENC = False
+
+# 최적 동시 작업 수 계산
+# A100 GPU는 강력하지만, 메모리 사용량을 고려하여 동시 작업 수 제한
+MAX_CONCURRENT_TASKS = min(CPU_COUNT * 2, 8)  # CPU 코어 수의 2배, 최대 8개
+print(f"최대 동시 작업 수: {MAX_CONCURRENT_TASKS}")
+
+# 품질 설정 (A100 GPU 최적화)
+QUALITY_SETTINGS = {
+    "low": {
+        "resolution": (640, 360),
+        "preset": "p1" if HAS_NVENC else "ultrafast",  # NVENC 프리셋
+        "crf": "32" if not HAS_NVENC else None,  # NVENC는 CRF 대신 b:v 사용
+        "audio_bitrate": "96k",
+        "video_bitrate": "1M" if HAS_NVENC else None
+    },
+    "medium": {
+        "resolution": (854, 480),
+        "preset": "p3" if HAS_NVENC else "veryfast",
+        "crf": "28" if not HAS_NVENC else None,
+        "audio_bitrate": "128k",
+        "video_bitrate": "2M" if HAS_NVENC else None
+    },
+    "high": {
+        "resolution": (1280, 720),
+        "preset": "p5" if HAS_NVENC else "faster",
+        "crf": "23" if not HAS_NVENC else None,
+        "audio_bitrate": "192k",
+        "video_bitrate": "4M" if HAS_NVENC else None
+    }
+}
+
+def get_cache_key(paragraph, voice_id, image_url, quality):
+    """캐시 키 생성"""
+    data = f"{paragraph}|{voice_id}|{image_url}|{quality}"
+    return hashlib.md5(data.encode()).hexdigest()
+
+async def download_and_optimize_image(session, url, dest_path, target_resolution=(854, 480)):
+    """이미지 다운로드 후 최적화"""
     try:
         async with session.get(url) as response:
             if response.status != 200:
                 raise HTTPException(status_code=500, detail=f"이미지 다운로드 실패: HTTP {response.status}")
             
             image_data = await response.read()
-            with open(dest_path, 'wb') as f:
-                f.write(image_data)
             
-            # 이미지 리사이징
-            try:
-                img = Image.open(dest_path)
-                img = img.resize(target_resolution, Image.LANCZOS)
-                img.save(dest_path, optimize=True, quality=85)
-            except Exception as e:
-                print(f"이미지 리사이징 실패: {str(e)}")
+            # 메모리에서 이미지 처리
+            img = Image.open(io.BytesIO(image_data))
+            
+            # 해상도 조정
+            img = img.resize(target_resolution, Image.LANCZOS)
+            
+            # 이미지 최적화
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", optimize=True, quality=70)
+            
+            # 파일로 저장
+            with open(dest_path, 'wb') as f:
+                f.write(buffer.getvalue())
             
             return dest_path
     except Exception as e:
@@ -63,15 +158,32 @@ async def download_file(session, url, dest_path):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"파일 다운로드 실패: {str(e)}")
 
-async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id):
-    """각 문단을 병렬로 처리"""
+async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality="medium"):
+    """각 문단을 병렬로 처리 (캐싱 적용)"""
     try:
+        start_time = time.time()
         print(f"문단 {i} 처리 시작")
+        settings = QUALITY_SETTINGS.get(quality, QUALITY_SETTINGS["medium"])
         
-        # 이미지 다운로드 및 리사이징
+        # 캐시 키 생성
+        cache_key = get_cache_key(paragraph, voice_id, image_url, quality)
+        cache_path = os.path.join(CACHE_DIR, f"segment_{cache_key}.mp4")
+        
+        # 캐시 확인
+        if os.path.exists(cache_path):
+            print(f"문단 {i}의 캐시 발견: {cache_path}")
+            output_path = os.path.join(temp_dir, f"segment_{i}.mp4")
+            shutil.copy(cache_path, output_path)
+            print(f"문단 {i} 캐시 처리 완료: {time.time() - start_time:.2f}초")
+            return {
+                "index": i,
+                "segment_path": output_path
+            }
+        
+        # 이미지 다운로드 및 최적화
         image_path = os.path.join(temp_dir, f"image_{i}.jpg")
         async with aiohttp.ClientSession() as session:
-            await download_and_resize_image(session, image_url, image_path)
+            await download_and_optimize_image(session, image_url, image_path, settings["resolution"])
         
         # TTS 생성
         audio_url = generate_tts(paragraph, "ko-KR", voice_id)
@@ -84,25 +196,49 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id):
         # 세그먼트 비디오 생성
         output_path = os.path.join(temp_dir, f"segment_{i}.mp4")
         
-        # FFmpeg 명령어 구성
-        cmd = [
-            FFMPEG_PATH, "-y",
-            "-loop", "1",
-            "-i", image_path,
-            "-i", audio_path,
-            "-c:v", "libx264",
-            "-tune", "stillimage",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-shortest",
-            "-preset", "faster",  # 인코딩 속도 향상
-            "-threads", "2",      # 스레드 수 제한
-            output_path
-        ]
+        # FFmpeg 명령어 구성 - GPU 가속 사용
+        if HAS_NVENC:
+            # NVIDIA GPU 하드웨어 가속 사용
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-loop", "1",
+                "-i", image_path,
+                "-i", audio_path,
+                "-c:v", "h264_nvenc",  # NVIDIA 하드웨어 인코딩
+                "-tune", "stillimage",
+                "-c:a", "aac",
+                "-b:a", settings["audio_bitrate"],
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                "-preset", settings["preset"],  # NVENC 프리셋
+                "-b:v", settings["video_bitrate"],  # 비디오 비트레이트
+                "-rc:v", "vbr_hq",  # 가변 비트레이트, 고품질
+                "-movflags", "+faststart",
+                "-gpu", "0",  # GPU 선택 (MIG 환경에서는 적절히 조정)
+                output_path
+            ]
+        else:
+            # CPU 인코딩 사용
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-loop", "1",
+                "-i", image_path,
+                "-i", audio_path,
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-c:a", "aac",
+                "-b:a", settings["audio_bitrate"],
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                "-preset", settings["preset"],
+                "-crf", settings["crf"],
+                "-threads", str(min(CPU_COUNT, 2)),  # 스레드 수 제한
+                "-movflags", "+faststart",
+                output_path
+            ]
         
         # FFmpeg 실행
-        print(f"문단 {i} FFmpeg 실행: {' '.join(cmd)}")
+        print(f"문단 {i} FFmpeg 실행 ({('GPU' if HAS_NVENC else 'CPU')} 인코딩)")
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -115,7 +251,11 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id):
             print(f"FFmpeg 오류 (문단 {i}): {stderr.decode()}")
             raise HTTPException(status_code=500, detail=f"비디오 세그먼트 생성 실패: {stderr.decode()}")
         
-        print(f"문단 {i} 처리 완료: {output_path}")
+        # 캐시 저장
+        shutil.copy(output_path, cache_path)
+        
+        elapsed_time = time.time() - start_time
+        print(f"문단 {i} 처리 완료: {output_path} ({elapsed_time:.2f}초)")
         return {
             "index": i,
             "segment_path": output_path
@@ -128,10 +268,13 @@ async def generate_video_with_tts_and_images(
     summary_id: int,
     paragraphs: List[str],
     voice_id: str,
-    image_urls: Dict[str, str]
+    image_urls: Dict[str, str],
+    quality: str = "medium"
 ) -> str:
-    """TTS와 이미지를 사용하여 비디오 생성 (병렬 처리 및 FFmpeg 사용)"""
-    print(f"비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}")
+    """TTS와 이미지를 사용하여 비디오 생성 (GPU 가속 및 병렬 처리)"""
+    start_time = time.time()
+    print(f"비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}, 품질={quality}")
+    print(f"GPU 가속: {HAS_NVENC}")
     
     # 임시 디렉토리 생성
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -147,12 +290,20 @@ async def generate_video_with_tts_and_images(
                 print(f"문단 {idx_str}에 대한 이미지 URL이 없습니다.")
                 continue
                 
-            tasks.append(process_paragraph(i, paragraph, image_url, temp_dir, voice_id))
+            tasks.append(process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality))
         
         print(f"총 {len(tasks)}개의 문단 처리 태스크 생성")
         
-        # 모든 태스크 병렬 실행
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 세마포어를 사용하여 동시 작업 수 제한
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+        
+        async def limited_task(task_func):
+            async with semaphore:
+                return await task_func
+        
+        # 제한된 동시성으로 태스크 실행
+        limited_tasks = [limited_task(task) for task in tasks]
+        results = await asyncio.gather(*limited_tasks, return_exceptions=True)
         
         # 에러 처리
         errors = [r for r in results if isinstance(r, Exception)]
@@ -187,6 +338,7 @@ async def generate_video_with_tts_and_images(
             "-safe", "0",
             "-i", concat_file,
             "-c", "copy",  # 스트림 복사 (재인코딩 없음)
+            "-movflags", "+faststart",  # 웹 스트리밍 최적화
             video_path
         ]
         
@@ -205,29 +357,103 @@ async def generate_video_with_tts_and_images(
             print(f"최종 비디오 생성 실패: {stderr.decode()}")
             raise HTTPException(status_code=500, detail=f"최종 비디오 생성 실패: {stderr.decode()}")
         
-        print(f"최종 비디오 생성 완료: {video_path}")
+        total_time = time.time() - start_time
+        print(f"최종 비디오 생성 완료: {video_path} (총 소요시간: {total_time:.2f}초)")
         
         # 비디오 URL 반환
         return f"{DOMAIN_URL}/videos/{video_filename}"
 
-def generate_video_file(video_id: int) -> str:
-    """간단한 테스트 비디오 생성 함수"""
-    # UUID를 사용하여 고유한 파일명 생성
-    unique_filename = f"video_{uuid.uuid4()}.mp4"
-    video_filename = f"{VIDEO_DIR}/{unique_filename}"
-
-    # 간단한 텍스트 비디오 생성
-    cmd = [
-        FFMPEG_PATH, "-y",
-        "-f", "lavfi",
-        "-i", f"color=c=black:s=1280x720:d=5",
-        "-vf", f"drawtext=text='Video ID\\: {video_id}\\nGenerated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}':fontcolor=white:fontsize=50:x=(w-text_w)/2:y=(h-text_h)/2",
-        "-c:v", "libx264",
-        "-preset", "faster",
-        "-pix_fmt", "yuv420p",
-        video_filename
-    ]
+# 빠른 비디오 생성 함수 (단일 이미지 + 전체 오디오)
+async def generate_quick_video(
+    summary_id: int,
+    paragraphs: List[str],
+    voice_id: str,
+    image_urls: Dict[str, str],
+    quality: str = "medium"
+) -> str:
+    """빠른 비디오 생성 (단일 이미지 + 전체 오디오)"""
+    start_time = time.time()
+    print(f"빠른 비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}")
+    settings = QUALITY_SETTINGS.get(quality, QUALITY_SETTINGS["medium"])
     
-    subprocess.run(cmd, check=True)
-    
-    return f"{DOMAIN_URL}/videos/{unique_filename}"
+    # 임시 디렉토리 생성
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # 첫 번째 이미지 사용
+        first_image_url = image_urls.get("0")
+        if not first_image_url:
+            raise HTTPException(status_code=400, detail="이미지 URL이 없습니다.")
+        
+        # 이미지 다운로드
+        image_path = os.path.join(temp_dir, "image.jpg")
+        async with aiohttp.ClientSession() as session:
+            await download_and_optimize_image(session, first_image_url, image_path, settings["resolution"])
+        
+        # 모든 문단을 하나의 텍스트로 결합
+        full_text = " ".join(paragraphs)
+        
+        # TTS 생성
+        audio_url = generate_tts(full_text, "ko-KR", voice_id)
+        
+        # 오디오 다운로드
+        audio_path = os.path.join(temp_dir, "audio.wav")
+        async with aiohttp.ClientSession() as session:
+            await download_file(session, audio_url, audio_path)
+        
+        # 비디오 생성
+        video_filename = f"video_{uuid.uuid4()}.mp4"
+        video_path = os.path.join(VIDEO_DIR, video_filename)
+        
+        # FFmpeg 명령어 (GPU 가속 사용)
+        if HAS_NVENC:
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-loop", "1",
+                "-i", image_path,
+                "-i", audio_path,
+                "-c:v", "h264_nvenc",
+                "-tune", "stillimage",
+                "-c:a", "aac",
+                "-b:a", settings["audio_bitrate"],
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                "-preset", settings["preset"],
+                "-b:v", settings["video_bitrate"],
+                "-rc:v", "vbr_hq",
+                "-movflags", "+faststart",
+                "-gpu", "0",
+                video_path
+            ]
+        else:
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-loop", "1",
+                "-i", image_path,
+                "-i", audio_path,
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-c:a", "aac",
+                "-b:a", settings["audio_bitrate"],
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                "-preset", settings["preset"],
+                "-crf", settings["crf"],
+                "-movflags", "+faststart",
+                video_path
+            ]
+        
+        # FFmpeg 실행
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"비디오 생성 실패: {stderr.decode()}")
+        
+        total_time = time.time() - start_time
+        print(f"빠른 비디오 생성 완료: {video_path} (총 소요시간: {total_time:.2f}초)")
+        
+        return f"{DOMAIN_URL}/videos/{video_filename}"
