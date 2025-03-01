@@ -42,7 +42,7 @@ async def tts_generate(request: TTSRequest):
     다양한 음성 옵션을 선택할 수 있으며, 기본값은 한국어 남성 음성입니다.
     """
     try:
-        audio_url = generate_tts(
+        audio_url = await generate_tts(
             request.text, request.language_code, request.voice_name)
         return TTSResponse(audio_url=audio_url)
     except Exception as e:
