@@ -331,112 +331,121 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         }
     except Exception as e:
         logger.error(f"문단 {i} 처리 중 오류 발생: {str(e)}")
-        return Exception(f"문단 {i} 처리 중 오류 발생: {str(e)}")  # 예외 객체 반환
+        raise e  # 또는 그냥 raise
 
-async def generate_video_with_tts_and_images(
-    summary_id: int,
-    paragraphs: List[str],
-    voice_id: str,
-    image_urls: Dict[str, str],
-    quality: str = "medium"
-) -> str:
-    """TTS와 이미지를 사용하여 비디오 생성 (병렬 처리 및 FFmpeg 사용)"""
+async def generate_video_with_tts_and_images(paragraphs, image_urls, voice_id="ko-KR-Standard-B", quality="medium"):
+    """TTS와 이미지로 비디오 생성"""
     start_time = time.time()
-    logger.info(f"비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}, 품질={quality}")
+    logger.info(f"비디오 생성 시작: 문단 수={len(paragraphs)}, 품질={quality}")
     
     # 임시 디렉토리 생성
     with tempfile.TemporaryDirectory() as temp_dir:
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"임시 디렉토리 생성: {temp_dir}")
-        
-        # 병렬로 모든 문단 처리
-        tasks = []
-        for i, paragraph in enumerate(paragraphs):
-            idx_str = str(i)
-            image_url = image_urls.get(idx_str)
+        try:
+            # 문단 처리 태스크 생성
+            tasks = []
+            for i, paragraph in enumerate(paragraphs):
+                image_url = image_urls.get(str(i))
+                if not image_url:
+                    continue
+                
+                task = process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality)
+                tasks.append(task)
             
-            if not image_url:
-                logger.warning(f"문단 {i}의 이미지 URL이 없습니다. 기본 이미지 사용")
-                # 기본 이미지 URL 설정 (필요시)
-                image_url = image_urls.get("0") or list(image_urls.values())[0]
+            logger.info(f"총 {len(tasks)}개의 문단 처리 태스크 생성")
             
-            tasks.append(process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality))
-        
-        logger.info(f"총 {len(tasks)}개의 문단 처리 태스크 생성")
-        
-        # 세마포어를 사용하여 동시 작업 수 제한
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
-        
-        async def limited_task(task_func):
-            async with semaphore:
-                return await task_func
-        
-        # 제한된 동시성으로 태스크 실행
-        limited_tasks = [limited_task(task) for task in tasks]
-        results = await asyncio.gather(*limited_tasks, return_exceptions=True)
-        
-        # 오류 확인
-        errors = [r for r in results if isinstance(r, Exception)]
-        if errors:
-            logger.error(f"{len(errors)}개의 문단 처리 중 오류 발생")
-            raise errors[0]
-        
-        # 성공한 결과만 필터링
-        successful_results = [r for r in results if not isinstance(r, Exception)]
-        
-        # 인덱스 기준으로 정렬
-        sorted_results = sorted(successful_results, key=lambda x: x["index"])
-        
-        # 세그먼트 파일 목록 생성
-        segment_files = [result["segment_path"] for result in sorted_results]
-        
-        if not segment_files:
-            logger.error("처리된 세그먼트가 없습니다.")
-            raise HTTPException(status_code=500, detail="비디오 세그먼트 생성 실패")
-        
-        # 세그먼트 파일 목록 파일 생성
-        segments_list_path = os.path.join(temp_dir, "segments.txt")
-        with open(segments_list_path, 'w') as f:
-            for segment_file in segment_files:
-                f.write(f"file '{segment_file}'\n")
-        
-        # 최종 비디오 생성
-        video_filename = f"video_{uuid.uuid4()}.mp4"
-        video_path = os.path.join(VIDEO_DIR, video_filename)
-        
-        # FFmpeg 명령어 (세그먼트 연결)
-        cmd = [
-            FFMPEG_PATH, "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", segments_list_path,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            "-loglevel", "error",  # FFmpeg 로그 레벨 조정
-            video_path
-        ]
-        
-        logger.info("최종 비디오 생성 시작")
-        
-        # FFmpeg 실행
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            error_msg = stderr.decode()
-            logger.error(f"최종 비디오 생성 실패: {error_msg[:200]}...")
-            raise HTTPException(status_code=500, detail=f"최종 비디오 생성 실패: {error_msg}")
-        
-        total_time = time.time() - start_time
-        logger.info(f"최종 비디오 생성 완료: 총 소요시간: {total_time:.2f}초")
-        
-        # 비디오 URL 반환
-        return f"{DOMAIN_URL}/videos/{video_filename}"
+            # 병렬 처리 실행 (에러 처리 개선)
+            results = []
+            errors = []
+            
+            for task in asyncio.as_completed(tasks):
+                try:
+                    result = await task
+                    results.append(result)
+                except Exception as e:
+                    errors.append(e)
+            
+            # 오류 확인
+            if errors:
+                logger.error(f"{len(errors)}개의 문단 처리 중 오류 발생")
+                raise errors[0]
+            
+            # 세그먼트 순서대로 정렬
+            results.sort(key=lambda x: x["index"])
+            
+            # 세그먼트 파일 목록 생성
+            segment_files = [result["segment_path"] for result in results]
+            
+            if not segment_files:
+                logger.error("처리된 세그먼트가 없습니다")
+                raise HTTPException(status_code=500, detail="비디오 세그먼트 생성 실패")
+            
+            # 세그먼트 파일 목록 파일 생성
+            segments_list_path = os.path.join(temp_dir, "segments.txt")
+            with open(segments_list_path, 'w') as f:
+                for segment_file in segment_files:
+                    f.write(f"file '{segment_file}'\n")
+            
+            # 최종 비디오 생성
+            video_filename = f"video_{uuid.uuid4()}.mp4"
+            video_path = os.path.join(VIDEO_DIR, video_filename)
+            
+            # FFmpeg 명령어 (세그먼트 연결)
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", segments_list_path,
+                "-c", "copy",  # 단순 복사로 빠르게 처리
+                "-movflags", "+faststart",
+                "-loglevel", "error",
+                video_path
+            ]
+            
+            logger.info("최종 비디오 생성 시작")
+            
+            # FFmpeg 실행
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode()
+                logger.error(f"최종 비디오 생성 실패: {error_msg[:200]}...")
+                raise HTTPException(status_code=500, detail=f"최종 비디오 생성 실패: {error_msg}")
+            
+            # 최종 비디오 길이 확인
+            if FFPROBE_PATH:
+                cmd = [
+                    FFPROBE_PATH, "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    video_path
+                ]
+                
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode == 0:
+                    actual_duration = float(stdout.decode().strip())
+                    logger.info(f"최종 비디오 길이: {actual_duration:.2f}초")
+            
+            total_time = time.time() - start_time
+            logger.info(f"최종 비디오 생성 완료: 총 소요시간: {total_time:.2f}초")
+            
+            # 비디오 URL 반환
+            return f"{DOMAIN_URL}/videos/{video_filename}"
+            
+        except Exception as e:
+            logger.error(f"비디오 생성 중 오류: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"비디오 생성 중 오류: {str(e)}")
 
 # 빠른 비디오 생성 함수 (단일 이미지 + 전체 오디오)
 async def generate_quick_video(
