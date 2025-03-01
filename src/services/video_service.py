@@ -232,8 +232,8 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         async with aiohttp.ClientSession() as session:
             await download_and_optimize_image(session, image_url, image_path, settings["resolution"])
         
-        # TTS 생성
-        audio_url = generate_tts(paragraph, "ko-KR", voice_id)
+        # TTS 생성 (비동기 함수로 변경되었으므로 await 사용)
+        audio_url = await generate_tts(paragraph, "ko-KR", voice_id)
         
         # 오디오 다운로드
         audio_path = os.path.join(temp_dir, f"audio_{i}.wav")
@@ -460,7 +460,7 @@ async def generate_quick_video(
         full_text = " ".join(paragraphs)
         
         # TTS 생성
-        audio_url = generate_tts(full_text, "ko-KR", voice_id)
+        audio_url = await generate_tts(full_text, "ko-KR", voice_id)
         
         # 오디오 다운로드
         audio_path = os.path.join(temp_dir, "audio.wav")
