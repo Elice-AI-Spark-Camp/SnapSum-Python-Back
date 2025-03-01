@@ -1,6 +1,6 @@
 import os
 import base64
-import requests
+import aiohttp
 import uuid
 import json
 from fastapi import HTTPException
@@ -23,7 +23,7 @@ DOMAIN_URL = os.getenv("DOMAIN_URL", "http://localhost:5001")
 TTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tts_audio")
 os.makedirs(TTS_DIR, exist_ok=True)
 
-def generate_tts(text: str, language_code: str, voice_name: str) -> str:
+async def generate_tts(text: str, language_code: str, voice_name: str) -> str:
     """
     Elice AI Spark Camp의 Google Cloud TTS API를 호출하여 음성 파일을 생성하고 저장한 후, 다운로드할 수 있는 URL 반환
     """
@@ -42,44 +42,45 @@ def generate_tts(text: str, language_code: str, voice_name: str) -> str:
     # 디버깅을 위한 로그 추가
     print(f"TTS API 요청: {ELICE_TTS_API_URL}")
     print(f"TTS API 페이로드: {json.dumps(payload)}")
-    response = requests.post(ELICE_TTS_API_URL, json=payload, headers=headers)
-
-    # 디버깅을 위한 응답 로그 추가
-    print(f"TTS API 응답 상태 코드: {response.status_code}")
-
     
-    if response.status_code != 200:
-        error_message = f"TTS 변환 실패: API 응답 오류 ({response.status_code})"
-        try:
-            error_detail = response.json()
-            error_message += f" - {json.dumps(error_detail)}"
-        except:
-            error_message += f" - {response.text}"
-        
-        print(f"오류: {error_message}")
-        raise HTTPException(status_code=500, detail=error_message)
+    # aiohttp 사용하여 비동기 요청
+    async with aiohttp.ClientSession() as session:
+        async with session.post(ELICE_TTS_API_URL, json=payload, headers=headers) as response:
+            # 디버깅을 위한 응답 로그 추가
+            print(f"TTS API 응답 상태 코드: {response.status}")
+            
+            if response.status != 200:
+                error_message = f"TTS 변환 실패: API 응답 오류 ({response.status})"
+                try:
+                    error_detail = await response.json()
+                    error_message += f" - {json.dumps(error_detail)}"
+                except:
+                    error_message += f" - {await response.text()}"
+                
+                print(f"오류: {error_message}")
+                raise HTTPException(status_code=500, detail=error_message)
 
-    try:
-        response_json = response.json()
-        
-        # 응답 구조 확인
-        if "audioContent" in response_json:
-            audio_content = response_json["audioContent"]
-        else:
-            # 응답 구조가 다를 수 있으므로 다른 키 확인
-            possible_keys = ["audio", "audio_content", "content", "wav_bytes"]
-            for key in possible_keys:
-                if key in response_json:
-                    audio_content = response_json[key]
-                    print(f"오디오 데이터 키 발견: {key}")
-                    break
-            else:
-                # 응답 구조 출력
-                print(f"응답에서 오디오 데이터를 찾을 수 없음. 응답 키: {list(response_json.keys())}")
-                raise HTTPException(status_code=500, detail=f"TTS 변환 실패: 응답에서 오디오 데이터 없음. 응답 키: {list(response_json.keys())}")
-    except Exception as e:
-        print(f"응답 처리 중 오류 발생: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"TTS 변환 실패: 응답 처리 중 오류 - {str(e)}")
+            try:
+                response_json = await response.json()
+                
+                # 응답 구조 확인
+                if "audioContent" in response_json:
+                    audio_content = response_json["audioContent"]
+                else:
+                    # 응답 구조가 다를 수 있으므로 다른 키 확인
+                    possible_keys = ["audio", "audio_content", "content", "wav_bytes"]
+                    for key in possible_keys:
+                        if key in response_json:
+                            audio_content = response_json[key]
+                            print(f"오디오 데이터 키 발견: {key}")
+                            break
+                    else:
+                        # 응답 구조 출력
+                        print(f"응답에서 오디오 데이터를 찾을 수 없음. 응답 키: {list(response_json.keys())}")
+                        raise HTTPException(status_code=500, detail=f"TTS 변환 실패: 응답에서 오디오 데이터 없음. 응답 키: {list(response_json.keys())}")
+            except Exception as e:
+                print(f"응답 처리 중 오류 발생: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"TTS 변환 실패: 응답 처리 중 오류 - {str(e)}")
 
     if not audio_content:
         print("오디오 콘텐츠가 비어 있음")
