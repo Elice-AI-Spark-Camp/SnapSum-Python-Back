@@ -94,25 +94,22 @@ logger.info(f"최대 동시 작업 수: {MAX_CONCURRENT_TASKS}")
 # 품질 설정
 QUALITY_SETTINGS = {
     "low": {
-        "resolution": (640, 360),
-        "preset": "p1" if HAS_NVENC else "ultrafast",
-        "crf": "32",
-        "audio_bitrate": "96k",
-        "video_bitrate": "1M"
+        "resolution": (480, 854),  # 세로형 비디오 (9:16 비율)
+        "audio_bitrate": "64k",
+        "preset": "ultrafast",
+        "crf": "28"
     },
     "medium": {
-        "resolution": (854, 480),
-        "preset": "p3" if HAS_NVENC else "veryfast",
-        "crf": "28",
+        "resolution": (720, 1280),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "128k",
-        "video_bitrate": "2M"
+        "preset": "medium",
+        "crf": "23"
     },
     "high": {
-        "resolution": (1280, 720),
-        "preset": "p5" if HAS_NVENC else "faster",
-        "crf": "23",
+        "resolution": (1080, 1920),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "192k",
-        "video_bitrate": "4M"
+        "preset": "slow",
+        "crf": "18"
     }
 }
 
@@ -121,8 +118,8 @@ def get_cache_key(paragraph, voice_id, image_url, quality):
     data = f"{paragraph}|{voice_id}|{image_url}|{quality}"
     return hashlib.md5(data.encode()).hexdigest()
 
-async def download_and_optimize_image(session, url, dest_path, target_resolution=(854, 480)):
-    """이미지 다운로드 후 최적화"""
+async def download_and_optimize_image(session, url, output_path, target_resolution=(720, 1280)):
+    """이미지 다운로드 및 최적화"""
     try:
         async with session.get(url) as response:
             if response.status != 200:
@@ -130,23 +127,53 @@ async def download_and_optimize_image(session, url, dest_path, target_resolution
             
             image_data = await response.read()
             
-            # 메모리에서 이미지 처리
-            img = Image.open(io.BytesIO(image_data))
-            
-            # 해상도 조정
-            img = img.resize(target_resolution, Image.LANCZOS)
-            
-            # 이미지 최적화
-            buffer = io.BytesIO()
-            img.save(buffer, format="JPEG", optimize=True, quality=85)
-            
-            # 파일로 저장
-            with open(dest_path, 'wb') as f:
-                f.write(buffer.getvalue())
-            
-            return dest_path
+            # 이미지 처리
+            with Image.open(io.BytesIO(image_data)) as img:
+                # 원본 이미지 비율 계산
+                width, height = img.size
+                aspect_ratio = width / height
+                
+                # 세로형 비디오에 맞게 이미지 조정
+                target_width, target_height = target_resolution
+                target_aspect = target_width / target_height  # 9:16 비율
+                
+                if aspect_ratio > target_aspect:  # 원본이 더 가로로 넓은 경우
+                    # 세로 크기에 맞추고 가로는 크롭
+                    new_height = target_height
+                    new_width = int(new_height * aspect_ratio)
+                    resized = img.resize((new_width, new_height), Image.LANCZOS)
+                    
+                    # 중앙 크롭
+                    left = (new_width - target_width) // 2
+                    right = left + target_width
+                    cropped = resized.crop((left, 0, right, new_height))
+                else:  # 원본이 더 세로로 긴 경우
+                    # 가로 크기에 맞추고 세로는 크롭 또는 패딩
+                    new_width = target_width
+                    new_height = int(new_width / aspect_ratio)
+                    
+                    if new_height >= target_height:  # 크롭 필요
+                        resized = img.resize((new_width, new_height), Image.LANCZOS)
+                        top = (new_height - target_height) // 2
+                        bottom = top + target_height
+                        cropped = resized.crop((0, top, new_width, bottom))
+                    else:  # 패딩 필요
+                        # 검은색 배경 생성
+                        background = Image.new('RGB', (target_width, target_height), (0, 0, 0))
+                        resized = img.resize((new_width, new_height), Image.LANCZOS)
+                        
+                        # 중앙에 배치
+                        offset = ((target_width - new_width) // 2, (target_height - new_height) // 2)
+                        background.paste(resized, offset)
+                        cropped = background
+                
+                # 최적화된 이미지 저장
+                cropped.save(output_path, format="JPEG", quality=90, optimize=True)
+                
+                return output_path
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"이미지 다운로드 실패: {str(e)}")
+        logger.error(f"이미지 처리 중 오류: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"이미지 처리 중 오류: {str(e)}")
 
 async def download_file(session, url, dest_path):
     """파일 다운로드"""
