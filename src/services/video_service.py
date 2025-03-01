@@ -239,7 +239,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                 img.save(image_path, format="JPEG", quality=85)
         
         # TTS 생성
-        audio_url = await generate_tts(paragraph, voice_id)
+        audio_url = await generate_tts(paragraph, "ko-KR", voice_id)
         audio_path = os.path.join(temp_dir, f"audio_{i}.wav")
         
         async with aiohttp.ClientSession() as session:
