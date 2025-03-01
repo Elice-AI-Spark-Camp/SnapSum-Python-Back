@@ -63,53 +63,69 @@ logger.info(f"FFmpeg 경로: {FFMPEG_PATH}")
 
 # NVENC 사용 가능 여부 확인 (더 엄격한 검사)
 HAS_NVENC = False
+HAS_GPU = False
+
 try:
-    # 실제 인코딩 테스트로 NVENC 사용 가능 여부 확인
-    test_cmd = [
-        FFMPEG_PATH, "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1:d=1",
-        "-c:v", "h264_nvenc", "-f", "null", "-"
-    ]
+    # A100 GPU 확인 (CUDA 라이브러리 사용)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            logger.info(f"GPU 감지됨: {gpu_name}")
+            HAS_GPU = True
+            if "A100" in gpu_name:
+                logger.info("A100 GPU 감지됨")
+    except ImportError:
+        logger.info("PyTorch가 설치되지 않아 GPU 확인 불가")
     
-    result = subprocess.run(test_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-    
-    if result.returncode == 0:
-        logger.info("NVENC 하드웨어 가속 사용 가능 (테스트 성공)")
-        HAS_NVENC = True
-    else:
-        logger.info(f"NVENC 하드웨어 가속 사용 불가 (테스트 실패)")
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"NVENC 오류: {result.stderr.decode()}")
-        HAS_NVENC = False
+    # NVENC 테스트
+    if HAS_GPU:
+        test_cmd = [
+            FFMPEG_PATH, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1:d=1",
+            "-c:v", "h264_nvenc", "-f", "null", "-"
+        ]
+        
+        result = subprocess.run(test_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        
+        if result.returncode == 0:
+            logger.info("NVENC 하드웨어 가속 사용 가능 (테스트 성공)")
+            HAS_NVENC = True
+        else:
+            logger.info(f"NVENC 하드웨어 가속 사용 불가 (테스트 실패)")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"NVENC 오류: {result.stderr.decode()}")
 except Exception as e:
-    logger.info(f"NVENC 테스트 중 오류 발생")
+    logger.info(f"GPU 테스트 중 오류 발생: {str(e)}")
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"상세 오류: {str(e)}")
-    HAS_NVENC = False
 
-# 최적 동시 작업 수 계산
-MAX_CONCURRENT_TASKS = min(CPU_COUNT * 2, 8)  # CPU 코어 수의 2배, 최대 8개
+# 최적 동시 작업 수 계산 (GPU 있을 경우 더 많은 병렬 처리)
+MAX_CONCURRENT_TASKS = min(CPU_COUNT * 2, 16) if HAS_GPU else min(CPU_COUNT * 2, 8)
 logger.info(f"최대 동시 작업 수: {MAX_CONCURRENT_TASKS}")
 
-# 품질 설정
+# 품질 설정 (GPU 최적화 포함)
 QUALITY_SETTINGS = {
     "low": {
         "resolution": (480, 854),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "64k",
         "preset": "ultrafast",
-        "crf": "28"
+        "crf": "28",
+        "gpu_options": ["-hwaccel", "cuda"] if HAS_GPU else []
     },
     "medium": {
         "resolution": (720, 1280),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "128k",
         "preset": "medium",
-        "crf": "23"
+        "crf": "23",
+        "gpu_options": ["-hwaccel", "cuda"] if HAS_GPU else []
     },
     "high": {
         "resolution": (1080, 1920),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "192k",
         "preset": "slow",
-        "crf": "18"
+        "crf": "18",
+        "gpu_options": ["-hwaccel", "cuda"] if HAS_GPU else []
     }
 }
 
@@ -189,7 +205,7 @@ async def download_file(session, url, dest_path):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"파일 다운로드 실패: {str(e)}")
 
-async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality="medium"):
+async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality="medium", use_gpu=False):
     """각 문단을 병렬로 처리 (캐싱 적용)"""
     try:
         if i % 5 == 0:  # 5개 문단마다 로그 출력
@@ -228,24 +244,46 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         output_path = os.path.join(temp_dir, f"segment_{i}.mp4")
         
         # FFmpeg 명령어 구성
-        # NVENC 사용 불가능하므로 항상 CPU 인코딩 사용
-        cmd = [
-            FFMPEG_PATH, "-y",
+        cmd = [FFMPEG_PATH, "-y"]
+        
+        # GPU 하드웨어 가속 옵션 추가
+        if use_gpu and HAS_GPU:
+            cmd.extend(settings["gpu_options"])
+        
+        # 입력 파일 추가
+        cmd.extend([
             "-loop", "1",
             "-i", image_path,
-            "-i", audio_path,
-            "-c:v", "libx264",
-            "-tune", "stillimage",
+            "-i", audio_path
+        ])
+        
+        # 인코딩 설정
+        if use_gpu and HAS_NVENC:
+            # NVENC 하드웨어 인코딩 사용
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-tune", "stillimage",
+                "-preset", "p1"  # NVENC 프리셋
+            ])
+        else:
+            # CPU 인코딩 또는 GPU 가속 + CPU 인코딩
+            cmd.extend([
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-preset", settings["preset"],
+                "-crf", settings["crf"]
+            ])
+        
+        # 공통 설정
+        cmd.extend([
             "-c:a", "aac",
             "-b:a", settings["audio_bitrate"],
             "-pix_fmt", "yuv420p",
             "-shortest",
-            "-preset", settings["preset"] if not HAS_NVENC else "veryfast",  # NVENC 프리셋은 CPU에서 사용 불가
-            "-crf", settings["crf"],
             "-movflags", "+faststart",
-            "-loglevel", "error",  # FFmpeg 로그 레벨 조정
+            "-loglevel", "error",
             output_path
-        ]
+        ])
         
         # FFmpeg 실행
         if logger.isEnabledFor(logging.DEBUG):
@@ -281,11 +319,16 @@ async def generate_video_with_tts_and_images(
     paragraphs: List[str],
     voice_id: str,
     image_urls: Dict[str, str],
-    quality: str = "medium"
+    quality: str = "medium",
+    use_gpu: bool = False,
+    batch_size: int = None
 ) -> str:
     """TTS와 이미지를 사용하여 비디오 생성 (병렬 처리 및 FFmpeg 사용)"""
     start_time = time.time()
-    logger.info(f"비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}, 품질={quality}")
+    logger.info(f"비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}, 품질={quality}, GPU 사용={use_gpu}")
+    
+    # 동시 작업 수 설정 (batch_size가 지정되면 해당 값 사용)
+    concurrent_tasks = batch_size if batch_size else MAX_CONCURRENT_TASKS
     
     # 임시 디렉토리 생성
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -303,12 +346,12 @@ async def generate_video_with_tts_and_images(
                 # 기본 이미지 URL 설정 (필요시)
                 image_url = image_urls.get("0") or list(image_urls.values())[0]
             
-            tasks.append(process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality))
+            tasks.append(process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality, use_gpu))
         
-        logger.info(f"총 {len(tasks)}개의 문단 처리 태스크 생성")
+        logger.info(f"총 {len(tasks)}개의 문단 처리 태스크 생성, 동시 처리 수: {concurrent_tasks}")
         
         # 세마포어를 사용하여 동시 작업 수 제한
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+        semaphore = asyncio.Semaphore(concurrent_tasks)
         
         async def limited_task(task_func):
             async with semaphore:
@@ -348,16 +391,22 @@ async def generate_video_with_tts_and_images(
         video_path = os.path.join(VIDEO_DIR, video_filename)
         
         # FFmpeg 명령어 (세그먼트 연결)
-        cmd = [
-            FFMPEG_PATH, "-y",
+        cmd = [FFMPEG_PATH, "-y"]
+        
+        # GPU 하드웨어 가속 옵션 추가 (최종 연결에도 GPU 사용)
+        if use_gpu and HAS_GPU:
+            settings = QUALITY_SETTINGS.get(quality, QUALITY_SETTINGS["medium"])
+            cmd.extend(settings["gpu_options"])
+        
+        cmd.extend([
             "-f", "concat",
             "-safe", "0",
             "-i", segments_list_path,
-            "-c", "copy",
+            "-c", "copy",  # 단순 연결이므로 copy 사용
             "-movflags", "+faststart",
             "-loglevel", "error",  # FFmpeg 로그 레벨 조정
             video_path
-        ]
+        ])
         
         logger.info("최종 비디오 생성 시작")
         
@@ -387,11 +436,12 @@ async def generate_quick_video(
     paragraphs: List[str],
     voice_id: str,
     image_urls: Dict[str, str],
-    quality: str = "medium"
+    quality: str = "medium",
+    use_gpu: bool = False
 ) -> str:
     """빠른 비디오 생성 (단일 이미지 + 전체 오디오)"""
     start_time = time.time()
-    logger.info(f"빠른 비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}")
+    logger.info(f"빠른 비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}, GPU 사용={use_gpu}")
     settings = QUALITY_SETTINGS.get(quality, QUALITY_SETTINGS["medium"])
     
     # 임시 디렉토리 생성
@@ -421,24 +471,47 @@ async def generate_quick_video(
         video_filename = f"video_{uuid.uuid4()}.mp4"
         video_path = os.path.join(VIDEO_DIR, video_filename)
         
-        # FFmpeg 명령어 (CPU 인코딩 사용)
-        cmd = [
-            FFMPEG_PATH, "-y",
+        # FFmpeg 명령어 구성
+        cmd = [FFMPEG_PATH, "-y"]
+        
+        # GPU 하드웨어 가속 옵션 추가
+        if use_gpu and HAS_GPU:
+            cmd.extend(settings["gpu_options"])
+        
+        # 입력 파일 추가
+        cmd.extend([
             "-loop", "1",
             "-i", image_path,
-            "-i", audio_path,
-            "-c:v", "libx264",
-            "-tune", "stillimage",
+            "-i", audio_path
+        ])
+        
+        # 인코딩 설정
+        if use_gpu and HAS_NVENC:
+            # NVENC 하드웨어 인코딩 사용
+            cmd.extend([
+                "-c:v", "h264_nvenc",
+                "-tune", "stillimage",
+                "-preset", "p1"  # NVENC 프리셋
+            ])
+        else:
+            # CPU 인코딩 또는 GPU 가속 + CPU 인코딩
+            cmd.extend([
+                "-c:v", "libx264",
+                "-tune", "stillimage",
+                "-preset", settings["preset"],
+                "-crf", settings["crf"]
+            ])
+        
+        # 공통 설정
+        cmd.extend([
             "-c:a", "aac",
             "-b:a", settings["audio_bitrate"],
             "-pix_fmt", "yuv420p",
             "-shortest",
-            "-preset", settings["preset"] if not HAS_NVENC else "veryfast",
-            "-crf", settings["crf"],
             "-movflags", "+faststart",
-            "-loglevel", "error",  # FFmpeg 로그 레벨 조정
+            "-loglevel", "error",
             video_path
-        ]
+        ])
         
         # FFmpeg 실행
         process = await asyncio.create_subprocess_exec(
