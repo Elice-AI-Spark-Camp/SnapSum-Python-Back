@@ -66,7 +66,8 @@ async def generate_video(request: VideoRequest):
         request.summaryId,
         request.paragraphs,
         request.voice,
-        request.imageUrls
+        request.imageUrls,
+        "medium"  # 기본 품질 설정
     )
     
     return VideoResponse(videoId=request.summaryId, status="COMPLETED", videoUrl=video_url)

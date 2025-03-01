@@ -333,16 +333,15 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         logger.error(f"문단 {i} 처리 중 오류 발생: {str(e)}")
         raise e  # 또는 그냥 raise
 
-async def generate_video_with_tts_and_images(paragraphs, image_urls, voice_id="ko-KR-Standard-B", quality="medium"):
+async def generate_video_with_tts_and_images(summary_id, paragraphs, voice_id="ko-KR-Standard-B", image_urls=None, quality="medium"):
     """TTS와 이미지로 비디오 생성"""
     start_time = time.time()
     
-    if isinstance(paragraphs, int):
-        summary_id = paragraphs
-        logger.info(f"비디오 생성 시작: summary_id={summary_id}, 품질={quality}")
-        raise HTTPException(status_code=400, detail="paragraphs는 문단 목록이어야 합니다")
-    else:
-        logger.info(f"비디오 생성 시작: 문단 수={len(paragraphs)}, 품질={quality}")
+    # 매개변수 검증
+    if image_urls is None:
+        image_urls = {}
+    
+    logger.info(f"비디오 생성 시작: summary_id={summary_id}, 문단 수={len(paragraphs)}, 품질={quality}")
     
     # 임시 디렉토리 생성
     with tempfile.TemporaryDirectory() as temp_dir:
