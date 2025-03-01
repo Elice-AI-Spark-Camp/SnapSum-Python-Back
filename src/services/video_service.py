@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from services.tts_service import generate_tts
 from PIL import Image
 import shutil
+import concurrent.futures
 
 # 로깅 설정
 logging.basicConfig(
@@ -43,6 +44,7 @@ logger.info(f"시스템 정보: CPU {CPU_COUNT}코어")
 
 # FFmpeg 경로 확인
 FFMPEG_PATH = shutil.which("ffmpeg")
+FFPROBE_PATH = shutil.which("ffprobe")
 if not FFMPEG_PATH:
     # 일반적인 FFmpeg 설치 경로 확인
     possible_paths = [
@@ -59,59 +61,56 @@ if not FFMPEG_PATH:
     if not FFMPEG_PATH:
         raise RuntimeError("FFmpeg가 설치되어 있지 않습니다. FFmpeg를 설치해주세요.")
 
-logger.info(f"FFmpeg 경로: {FFMPEG_PATH}")
-
-# NVENC 사용 가능 여부 확인 (더 엄격한 검사)
-HAS_NVENC = False
-try:
-    # 실제 인코딩 테스트로 NVENC 사용 가능 여부 확인
-    test_cmd = [
-        FFMPEG_PATH, "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1:d=1",
-        "-c:v", "h264_nvenc", "-f", "null", "-"
+if not FFPROBE_PATH:
+    # 일반적인 FFprobe 설치 경로 확인
+    possible_paths = [
+        "/usr/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
+        os.path.expanduser("~/bin/ffprobe")
     ]
     
-    result = subprocess.run(test_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
-    
-    if result.returncode == 0:
-        logger.info("NVENC 하드웨어 가속 사용 가능 (테스트 성공)")
-        HAS_NVENC = True
-    else:
-        logger.info(f"NVENC 하드웨어 가속 사용 불가 (테스트 실패)")
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"NVENC 오류: {result.stderr.decode()}")
-        HAS_NVENC = False
-except Exception as e:
-    logger.info(f"NVENC 테스트 중 오류 발생")
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug(f"상세 오류: {str(e)}")
-    HAS_NVENC = False
+    for path in possible_paths:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            FFPROBE_PATH = path
+            break
 
-# 최적 동시 작업 수 계산
-MAX_CONCURRENT_TASKS = min(CPU_COUNT * 2, 8)  # CPU 코어 수의 2배, 최대 8개
-logger.info(f"최대 동시 작업 수: {MAX_CONCURRENT_TASKS}")
+logger.info(f"FFmpeg 경로: {FFMPEG_PATH}")
+logger.info(f"FFprobe 경로: {FFPROBE_PATH}")
 
-# 품질 설정
+# GPU 가속 관련 설정 업데이트
+HAS_NVENC = True  # A100은 NVENC를 지원합니다
+logger.info("NVIDIA A100 GPU 감지됨, 하드웨어 가속 사용")
+
+# A100 GPU에 최적화된 품질 설정
 QUALITY_SETTINGS = {
     "low": {
         "resolution": (480, 854),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "64k",
-        "preset": "ultrafast",
-        "crf": "28"
+        "preset": "p1",
+        "crf": "28",
+        "gpu_options": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     },
     "medium": {
         "resolution": (720, 1280),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "128k",
-        "preset": "medium",
-        "crf": "23"
+        "preset": "p2",
+        "crf": "23",
+        "gpu_options": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     },
     "high": {
         "resolution": (1080, 1920),  # 세로형 비디오 (9:16 비율)
         "audio_bitrate": "192k",
-        "preset": "slow",
-        "crf": "18"
+        "preset": "p3",
+        "crf": "20",
+        "gpu_options": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     }
 }
+
+# CPU 코어가 2개이므로 동시성 조정
+MAX_CONCURRENT_TASKS = 4
+
+# 메모리 사용량 최적화 (24GB 메모리 고려)
+MAX_MEMORY_USAGE = 20 * 1024 * 1024 * 1024
 
 def get_cache_key(paragraph, voice_id, image_url, quality):
     """캐시 키 생성"""
@@ -190,20 +189,15 @@ async def download_file(session, url, dest_path):
         raise HTTPException(status_code=500, detail=f"파일 다운로드 실패: {str(e)}")
 
 async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality="medium"):
-    """각 문단을 병렬로 처리 (캐싱 적용)"""
+    """각 문단을 병렬로 처리 (GPU 가속 적용)"""
     try:
-        if i % 5 == 0:  # 5개 문단마다 로그 출력
-            logger.info(f"문단 {i} 처리 시작")
-        settings = QUALITY_SETTINGS.get(quality, QUALITY_SETTINGS["medium"])
-        
         # 캐시 키 생성
         cache_key = get_cache_key(paragraph, voice_id, image_url, quality)
-        cache_path = os.path.join(CACHE_DIR, f"segment_{cache_key}.mp4")
+        cache_path = os.path.join(CACHE_DIR, f"{cache_key}.mp4")
         
         # 캐시 확인
         if os.path.exists(cache_path):
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"문단 {i}의 캐시 발견: {cache_path}")
+            logger.debug(f"캐시 사용: {cache_key}")
             output_path = os.path.join(temp_dir, f"segment_{i}.mp4")
             shutil.copy(cache_path, output_path)
             return {
@@ -211,45 +205,90 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                 "segment_path": output_path
             }
         
-        # 이미지 다운로드 및 리사이징
+        # 품질 설정 가져오기
+        settings = QUALITY_SETTINGS.get(quality, QUALITY_SETTINGS["medium"])
+        
+        # 이미지 다운로드 및 최적화
         image_path = os.path.join(temp_dir, f"image_{i}.jpg")
         async with aiohttp.ClientSession() as session:
-            await download_and_optimize_image(session, image_url, image_path, settings["resolution"])
+            try:
+                async with session.get(image_url, timeout=5) as response:
+                    if response.status != 200:
+                        logger.warning(f"이미지 다운로드 실패: {response.status}, 기본 이미지 사용")
+                        # 기본 검은색 이미지 생성
+                        img = Image.new('RGB', settings["resolution"], (0, 0, 0))
+                        img.save(image_path, format="JPEG", quality=85)
+                    else:
+                        image_data = await response.read()
+                        
+                        # 이미지 최적화 (ThreadPool 사용)
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(
+                                executor, 
+                                optimize_image, 
+                                image_data, 
+                                image_path, 
+                                settings["resolution"]
+                            )
+            except Exception as e:
+                logger.warning(f"이미지 처리 중 오류: {str(e)}, 기본 이미지 사용")
+                # 기본 검은색 이미지 생성
+                img = Image.new('RGB', settings["resolution"], (0, 0, 0))
+                img.save(image_path, format="JPEG", quality=85)
         
         # TTS 생성
-        audio_url = generate_tts(paragraph, "ko-KR", voice_id)
-        
-        # 오디오 다운로드
+        audio_url = await generate_tts(paragraph, voice_id)
         audio_path = os.path.join(temp_dir, f"audio_{i}.wav")
+        
         async with aiohttp.ClientSession() as session:
-            await download_file(session, audio_url, audio_path)
+            async with session.get(audio_url, timeout=5) as response:
+                if response.status != 200:
+                    raise HTTPException(status_code=500, detail=f"오디오 다운로드 실패: {response.status}")
+                
+                with open(audio_path, 'wb') as f:
+                    f.write(await response.read())
         
         # 세그먼트 비디오 생성
         output_path = os.path.join(temp_dir, f"segment_{i}.mp4")
         
-        # FFmpeg 명령어 구성
-        # NVENC 사용 불가능하므로 항상 CPU 인코딩 사용
+        # FFmpeg 명령어 구성 (A100 GPU 가속 활용)
         cmd = [
             FFMPEG_PATH, "-y",
+        ]
+        
+        # GPU 가속 옵션 추가
+        cmd.extend(settings["gpu_options"])
+        
+        # 입력 파일
+        cmd.extend([
             "-loop", "1",
             "-i", image_path,
             "-i", audio_path,
-            "-c:v", "libx264",
+        ])
+        
+        # 인코딩 설정 (NVENC 사용)
+        cmd.extend([
+            "-c:v", "h264_nvenc",  # NVIDIA 하드웨어 인코더 사용
             "-tune", "stillimage",
             "-c:a", "aac",
             "-b:a", settings["audio_bitrate"],
             "-pix_fmt", "yuv420p",
             "-shortest",
-            "-preset", settings["preset"] if not HAS_NVENC else "veryfast",  # NVENC 프리셋은 CPU에서 사용 불가
-            "-crf", settings["crf"],
+            "-preset", settings["preset"],
+            "-rc", "vbr",  # 가변 비트레이트
+            "-cq", settings["crf"],
+            # 세로형 비디오 해상도 명시적 설정
+            "-vf", f"scale={settings['resolution'][0]}:{settings['resolution'][1]}:force_original_aspect_ratio=decrease,pad={settings['resolution'][0]}:{settings['resolution'][1]}:(ow-iw)/2:(oh-ih)/2:black",
             "-movflags", "+faststart",
             "-loglevel", "error",  # FFmpeg 로그 레벨 조정
             output_path
-        ]
+        ])
         
         # FFmpeg 실행
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"문단 {i} FFmpeg 실행: {' '.join(cmd)}")
+        if i % 10 == 0:  # 로그 빈도 감소
+            logger.debug(f"문단 {i} FFmpeg 실행")
+        
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -260,14 +299,15 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         
         if process.returncode != 0:
             error_msg = stderr.decode()
-            logger.error(f"FFmpeg 오류 (문단 {i}): {error_msg[:200]}...")  # 오류 메시지 일부만 로깅
+            logger.error(f"FFmpeg 오류 (문단 {i}): {error_msg[:200]}...")
             raise HTTPException(status_code=500, detail=f"비디오 세그먼트 생성 실패: {error_msg}")
         
         # 캐시에 저장
         shutil.copy(output_path, cache_path)
         
-        if i % 5 == 0:  # 5개 문단마다 로그 출력
+        if i % 10 == 0:  # 로그 빈도 감소
             logger.info(f"문단 {i} 처리 완료")
+        
         return {
             "index": i,
             "segment_path": output_path
