@@ -224,7 +224,8 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                         # 이미지 최적화 (ThreadPool 사용)
                         with concurrent.futures.ThreadPoolExecutor() as executor:
                             loop = asyncio.get_event_loop()
-                            await loop.run_in_executor(
+                            # await 제거하고 run_in_executor 결과를 직접 사용
+                            optimize_result = await loop.run_in_executor(
                                 executor, 
                                 optimize_image, 
                                 image_data, 
@@ -238,7 +239,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
                 img.save(image_path, format="JPEG", quality=85)
         
         # TTS 생성
-        audio_url = await generate_tts(paragraph, "ko-KR", voice_id)
+        audio_url = await generate_tts(paragraph, voice_id)
         audio_path = os.path.join(temp_dir, f"audio_{i}.wav")
         
         async with aiohttp.ClientSession() as session:
@@ -258,7 +259,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         ]
         
         # GPU 가속 옵션 추가
-        cmd.extend(settings["gpu_options"])
+        cmd.extend(settings.get("gpu_options", []))
         
         # 입력 파일
         cmd.extend([
@@ -268,16 +269,31 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         ])
         
         # 인코딩 설정 (NVENC 사용)
+        video_codec = "h264_nvenc" if HAS_NVENC else "libx264"
         cmd.extend([
-            "-c:v", "h264_nvenc",  # NVIDIA 하드웨어 인코더 사용
+            "-c:v", video_codec,  # GPU 가속 또는 CPU 인코더
             "-tune", "stillimage",
             "-c:a", "aac",
             "-b:a", settings["audio_bitrate"],
             "-pix_fmt", "yuv420p",
             "-shortest",
-            "-preset", settings["preset"],
-            "-rc", "vbr",  # 가변 비트레이트
-            "-cq", settings["crf"],
+        ])
+        
+        # 인코더별 다른 옵션 적용
+        if video_codec == "h264_nvenc":
+            cmd.extend([
+                "-preset", settings.get("preset", "p2"),
+                "-rc", "vbr",  # 가변 비트레이트
+                "-cq", settings.get("crf", "23"),
+            ])
+        else:
+            cmd.extend([
+                "-preset", settings.get("preset", "veryfast"),
+                "-crf", settings.get("crf", "23"),
+            ])
+        
+        # 공통 옵션
+        cmd.extend([
             # 세로형 비디오 해상도 명시적 설정
             "-vf", f"scale={settings['resolution'][0]}:{settings['resolution'][1]}:force_original_aspect_ratio=decrease,pad={settings['resolution'][0]}:{settings['resolution'][1]}:(ow-iw)/2:(oh-ih)/2:black",
             "-movflags", "+faststart",
@@ -303,6 +319,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
             raise HTTPException(status_code=500, detail=f"비디오 세그먼트 생성 실패: {error_msg}")
         
         # 캐시에 저장
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         shutil.copy(output_path, cache_path)
         
         if i % 10 == 0:  # 로그 빈도 감소
@@ -314,7 +331,7 @@ async def process_paragraph(i, paragraph, image_url, temp_dir, voice_id, quality
         }
     except Exception as e:
         logger.error(f"문단 {i} 처리 중 오류 발생: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"비디오 생성 중 오류 발생: {str(e)}")
+        return Exception(f"문단 {i} 처리 중 오류 발생: {str(e)}")  # 예외 객체 반환
 
 async def generate_video_with_tts_and_images(
     summary_id: int,
@@ -498,3 +515,57 @@ async def generate_quick_video(
         logger.info(f"빠른 비디오 생성 완료: 총 소요시간: {total_time:.2f}초")
         
         return f"{DOMAIN_URL}/videos/{video_filename}"
+
+# optimize_image 함수 추가
+def optimize_image(image_data, output_path, target_resolution=(720, 1280)):
+    """이미지 최적화 함수 (스레드 풀에서 실행)"""
+    try:
+        with Image.open(io.BytesIO(image_data)) as img:
+            # 원본 이미지 비율 계산
+            width, height = img.size
+            aspect_ratio = width / height
+            
+            # 세로형 비디오에 맞게 이미지 조정
+            target_width, target_height = target_resolution
+            target_aspect = target_width / target_height  # 9:16 비율
+            
+            if aspect_ratio > target_aspect:  # 원본이 더 가로로 넓은 경우
+                # 세로 크기에 맞추고 가로는 크롭
+                new_height = target_height
+                new_width = int(new_height * aspect_ratio)
+                resized = img.resize((new_width, new_height), Image.LANCZOS)
+                
+                # 중앙 크롭
+                left = (new_width - target_width) // 2
+                right = left + target_width
+                cropped = resized.crop((left, 0, right, new_height))
+            else:  # 원본이 더 세로로 긴 경우
+                # 가로 크기에 맞추고 세로는 크롭 또는 패딩
+                new_width = target_width
+                new_height = int(new_width / aspect_ratio)
+                
+                if new_height >= target_height:  # 크롭 필요
+                    resized = img.resize((new_width, new_height), Image.LANCZOS)
+                    top = (new_height - target_height) // 2
+                    bottom = top + target_height
+                    cropped = resized.crop((0, top, new_width, bottom))
+                else:  # 패딩 필요
+                    # 검은색 배경 생성
+                    background = Image.new('RGB', (target_width, target_height), (0, 0, 0))
+                    resized = img.resize((new_width, new_height), Image.LANCZOS)
+                    
+                    # 중앙에 배치
+                    offset = ((target_width - new_width) // 2, (target_height - new_height) // 2)
+                    background.paste(resized, offset)
+                    cropped = background
+            
+            # 최적화된 이미지 저장
+            cropped.save(output_path, format="JPEG", quality=85, optimize=True)
+            
+            return output_path
+    except Exception as e:
+        logger.error(f"이미지 최적화 중 오류: {str(e)}")
+        # 오류 발생 시 검은색 이미지 생성
+        img = Image.new('RGB', target_resolution, (0, 0, 0))
+        img.save(output_path, format="JPEG", quality=85)
+        return output_path
